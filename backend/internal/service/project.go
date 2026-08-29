@@ -29,6 +29,7 @@ type UpdateProjectRequest struct {
 	AspectRatio      string  `json:"aspectRatio"`
 	SourceType       string  `json:"sourceType"`
 	Description      *string `json:"description"`
+	CoverResourceID  *string `json:"coverResourceId"`
 	StylePresetID    *string `json:"stylePresetId"`
 	StyleProfileJSON *string `json:"styleProfileJson"`
 	Status           string  `json:"status"`
@@ -86,8 +87,11 @@ type ProjectDetail struct {
 	AssetFolders    []model.ProjectAssetFolder    `json:"assetFolders"`
 	Workflows       []ProjectWorkflowDetail       `json:"workflows"`
 	Shots           []model.Shot                  `json:"shots"`
+	ShotRevisions   []model.ShotRevision          `json:"shotRevisions"`
+	ShotArtifacts   []model.ShotArtifact          `json:"shotArtifacts"`
 	ShotReferences  []model.ShotAssetReference    `json:"shotReferences"`
 	AssetCandidates []model.ProjectAssetCandidate `json:"assetCandidates"`
+	Tasks           []TaskSummary                 `json:"tasks"`
 }
 
 func (s *Service) ListProjects(userID string) ([]ProjectSummary, error) {
@@ -148,6 +152,13 @@ func (s *Service) ProjectDetail(userID string, id string) (ProjectDetail, error)
 			return ProjectDetail{}, err
 		}
 	}
+	if tasks, tasksErr := s.repo.SuccessfulWorkflowTasksForProject(userID, project.ID); tasksErr == nil {
+		for _, task := range tasks {
+			if err := s.RegisterTaskOutputFromTask(task); err != nil {
+				_ = s.log(userID, task.ID, "error", "项目读取时工作流产物补偿失败", err.Error())
+			}
+		}
+	}
 	// 项目工作台只返回章节摘要，长篇小说正文由单章接口按需读取。
 	units, err := s.repo.ProjectUnitSummaries(project.ID)
 	if err != nil {
@@ -177,6 +188,14 @@ func (s *Service) ProjectDetail(userID string, id string) (ProjectDetail, error)
 	if err != nil {
 		return ProjectDetail{}, err
 	}
+	shotRevisions, err := s.repo.ProjectShotRevisions(project.ID)
+	if err != nil {
+		return ProjectDetail{}, err
+	}
+	shotArtifacts, err := s.repo.ProjectShotArtifacts(project.ID)
+	if err != nil {
+		return ProjectDetail{}, err
+	}
 	shotReferences, err := s.repo.ProjectShotAssetReferences(project.ID)
 	if err != nil {
 		return ProjectDetail{}, err
@@ -185,7 +204,11 @@ func (s *Service) ProjectDetail(userID string, id string) (ProjectDetail, error)
 	if err != nil {
 		return ProjectDetail{}, err
 	}
-	return ProjectDetail{Project: *project, Units: units, Canvases: canvases, CanvasUnitLinks: canvasUnitLinks, Assets: assets, AssetFolders: assetFolders, Workflows: workflows, Shots: shots, ShotReferences: shotReferences, AssetCandidates: candidates}, nil
+	tasks, err := s.TasksWithOptions(userID, TaskListOptions{Limit: 100, ProjectID: project.ID})
+	if err != nil {
+		return ProjectDetail{}, err
+	}
+	return ProjectDetail{Project: *project, Units: units, Canvases: canvases, CanvasUnitLinks: canvasUnitLinks, Assets: assets, AssetFolders: assetFolders, Workflows: workflows, Shots: shots, ShotRevisions: shotRevisions, ShotArtifacts: shotArtifacts, ShotReferences: shotReferences, AssetCandidates: candidates, Tasks: tasks}, nil
 }
 
 func (s *Service) CreateProject(userID string, req CreateProjectRequest) (model.Project, error) {
@@ -252,6 +275,22 @@ func (s *Service) UpdateProject(userID string, id string, req UpdateProjectReque
 	if req.Description != nil {
 		project.Description = strings.TrimSpace(*req.Description)
 	}
+	if req.CoverResourceID != nil {
+		coverResourceID := strings.TrimSpace(*req.CoverResourceID)
+		if coverResourceID != "" {
+			resource, resourceErr := s.repo.ResourceForUser(userID, coverResourceID)
+			if resourceErr != nil {
+				if errors.Is(resourceErr, gorm.ErrRecordNotFound) {
+					return model.Project{}, BadAuthRequest("项目主图不存在或不属于当前用户")
+				}
+				return model.Project{}, resourceErr
+			}
+			if resource.Status != model.ResourceStatusReady || resource.Kind != "image" {
+				return model.Project{}, BadAuthRequest("项目主图必须是已就绪的图片资源")
+			}
+		}
+		project.CoverResourceID = coverResourceID
+	}
 	if req.StylePresetID != nil {
 		project.StylePresetID = strings.TrimSpace(*req.StylePresetID)
 	}
@@ -315,6 +354,17 @@ func (s *Service) DeleteProject(userID string, id string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Service) activeProjectForUser(userID string, projectID string) (*model.Project, error) {
+	project, err := s.repo.ProjectForUser(userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project.Status == model.ProjectStatusArchived {
+		return nil, BadAuthRequest("项目已归档，不能修改短剧生产数据")
+	}
+	return project, nil
 }
 
 func (s *Service) CreateProjectUnit(userID string, projectID string, req CreateProjectUnitRequest) (model.ProjectUnit, error) {
@@ -427,7 +477,7 @@ func newProjectUnit(projectID string, req CreateProjectUnitRequest, position int
 		position = 0
 	}
 	now := time.Now()
-	unit := model.ProjectUnit{ID: newID(), ProjectID: projectID, Kind: kind, Title: title, SourceText: req.SourceText, Status: model.ProjectUnitStatusDraft, Position: position, CreatedAt: now, UpdatedAt: now}
+	unit := model.ProjectUnit{ID: newID(), ProjectID: projectID, Kind: kind, Title: title, SourceText: req.SourceText, WordCount: model.ProjectUnitWordCount(req.SourceText), Status: model.ProjectUnitStatusDraft, Position: position, CreatedAt: now, UpdatedAt: now}
 	return unit, nil
 }
 
@@ -439,10 +489,12 @@ func (s *Service) UpdateProjectUnit(userID string, projectID string, unitID stri
 	if err != nil {
 		return model.ProjectUnit{}, err
 	}
+	sourceChanged := unit.SourceText != req.SourceText
 	if title := strings.TrimSpace(req.Title); title != "" {
 		unit.Title = title
 	}
 	unit.SourceText = req.SourceText
+	unit.WordCount = model.ProjectUnitWordCount(req.SourceText)
 	if status := model.ProjectUnitStatus(strings.TrimSpace(req.Status)); status != "" {
 		if status != model.ProjectUnitStatusDraft && status != model.ProjectUnitStatusReady && status != model.ProjectUnitStatusCompleted {
 			return model.ProjectUnit{}, BadAuthRequest("不支持的章节状态")
@@ -450,10 +502,7 @@ func (s *Service) UpdateProjectUnit(userID string, projectID string, unitID stri
 		unit.Status = status
 	}
 	unit.UpdatedAt = time.Now()
-	if err := s.repo.UpdateProjectUnit(unit); err != nil {
-		return model.ProjectUnit{}, err
-	}
-	if err := s.repo.BumpProjectRevision(projectID); err != nil {
+	if err := s.repo.UpdateProjectUnit(unit, sourceChanged); err != nil {
 		return model.ProjectUnit{}, err
 	}
 	return *unit, nil
