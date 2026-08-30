@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { defaultModelCapabilityConfig } from "../src/lib/model-capabilities";
-import { formatVideoResolutionLabel, normalizeVideoResolution, videoDimensionsForRatioAndResolution, videoResolutionComparisonKey, VIDEO_RESOLUTION_CAPABILITY_OPTIONS, VIDEO_RESOLUTION_OPTIONS } from "../src/lib/video-generation-options";
+import { formatVideoResolutionLabel, normalizeVideoResolution, resolveVideoResolutionForRatio, videoDimensionsForRatioAndResolution, videoResolutionComparisonKey, videoResolutionOptionsForRatio, VIDEO_RESOLUTION_CAPABILITY_OPTIONS, VIDEO_RESOLUTION_OPTIONS } from "../src/lib/video-generation-options";
 
 describe("video generation resolution options", () => {
     test("统一档位包含 1440P 与 4K，并识别常见别名", () => {
@@ -38,5 +38,14 @@ describe("video generation resolution options", () => {
 
     test("火山方舟默认开启全模态参考模式", () => {
         expect(defaultModelCapabilityConfig("volcengine-ark-video").video?.operations).toEqual(expect.arrayContaining(["reference_to_video", "audio_to_video"]));
+    });
+
+    test("按画幅保留供应商方向枚举并沿用默认清晰度档位", () => {
+        const resolutions = ["480p竖", "768p竖", "480p横", "768p横"];
+        expect(videoResolutionOptionsForRatio(resolutions, "9:16")).toEqual(["480p竖", "768p竖"]);
+        expect(videoResolutionOptionsForRatio(resolutions, "16:9")).toEqual(["480p横", "768p横"]);
+        expect(resolveVideoResolutionForRatio(resolutions, "768p竖", "9:16", "720")).toBe("768p竖");
+        expect(resolveVideoResolutionForRatio(resolutions, "768p竖", "16:9", "720")).toBe("768p横");
+        expect(resolveVideoResolutionForRatio(["480p", "720p", "1080p"], "720p", "9:16", "720")).toBe("720p");
     });
 });

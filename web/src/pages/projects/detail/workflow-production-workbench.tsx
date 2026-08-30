@@ -27,6 +27,8 @@ import { resourceFileUrl, resourceIdFromStorageKey } from "@/services/api/resour
 import { skillRuntime } from "@/services/skill-runtime";
 import { modelDisplayName, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { SkillRuntimePicker, useSkillRuntimeCatalog } from "@/components/skills/skill-runtime-picker";
+import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
+import { formatVideoResolutionLabel, resolveVideoResolutionForRatio, videoResolutionOptionsForRatio } from "@/lib/video-generation-options";
 
 import {
     ArtifactStatus,
@@ -98,17 +100,27 @@ export default function WorkflowProductionWorkbench(props: Props) {
     const [selectedModel, setSelectedModel] = useState(defaultModel || modelOptions[0] || "");
     const [aspectRatio, setAspectRatio] = useState(detail.project.aspectRatio || "16:9");
     const [resolution, setResolution] = useState(effectiveConfig.vquality || "720");
+    const videoProfile = useMemo(() => activeStage === "video" && selectedModel ? modelCapabilityConfigFor(effectiveConfig, selectedModel).video : undefined, [activeStage, effectiveConfig, selectedModel]);
+    const resolutionOptions = useMemo(() => {
+        if (!videoProfile?.resolutions.length) return ["480", "720", "1080"];
+        return videoResolutionOptionsForRatio(videoProfile.resolutions, aspectRatio);
+    }, [aspectRatio, videoProfile]);
     const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
     const { skills: availableSkills, loading: skillsLoading } = useSkillRuntimeCatalog();
     const shotAssetReferenceContext = useMemo(() => buildShotAssetReferenceContext(detail, selectedShot?.id || ""), [detail, selectedShot?.id]);
     const referenceByVersionId = useMemo(() => new Map((detail.shotReferences || []).filter((reference) => reference.shotId === selectedShot?.id && reference.role === "reference" && reference.status === "linked").map((reference) => [reference.assetVersionId, reference])), [detail.shotReferences, selectedShot?.id]);
     const modelSummary = selectedModel ? modelDisplayName(effectiveConfig, selectedModel) : "未选择模型";
     const durationSummary = `${Number(watchedDuration || Math.max(0.5, (selectedShot?.durationMs || 3000) / 1000))}s`;
-    const resolutionSummary = `${resolution.replace(/p$/i, "")}p`;
+    const resolutionSummary = formatVideoResolutionLabel(resolution);
 
     useEffect(() => {
         setSelectedModel(defaultModel || modelOptions[0] || "");
     }, [activeStage, defaultModel, modelOptions]);
+
+    useEffect(() => {
+        if (!videoProfile?.resolutions.length) return;
+        setResolution((current) => resolveVideoResolutionForRatio(videoProfile.resolutions, videoProfile.defaultResolution, aspectRatio, current));
+    }, [aspectRatio, videoProfile]);
 
     useEffect(() => {
         form.setFieldsValue({
@@ -354,7 +366,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
                                     <div className="workflow-form-grid is-three">
                                         <Form.Item name="durationSeconds" label="镜头时长（秒）"><InputNumber className="w-full" min={0.5} max={60} step={0.5} /></Form.Item>
                                         <Form.Item label="画幅"><Select value={aspectRatio} onChange={setAspectRatio} options={[detail.project.aspectRatio, "16:9", "9:16", "1:1"].filter((value, index, array) => value && array.indexOf(value) === index).map((value) => ({ value, label: value }))} /></Form.Item>
-                                        <Form.Item label="分辨率"><Select value={resolution} onChange={setResolution} options={[{ value: "480", label: "480p" }, { value: "720", label: "720p" }, { value: "1080", label: "1080p" }]} /></Form.Item>
+                                        <Form.Item label="分辨率"><Select value={resolution} onChange={setResolution} options={resolutionOptions.map((value) => ({ value, label: formatVideoResolutionLabel(value) }))} /></Form.Item>
                                     </div>
                                 </div>
                                 <div className="workflow-settings-section">
@@ -404,7 +416,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
                     </header>
                     <div className="workflow-preview-scroll thin-scrollbar">
                         {previewTab === "latest" ? <LatestPreview artifact={previewArtifact} emptyText={stageCopy.empty} /> : <ArtifactHistory artifacts={artifacts} activeId={previewArtifact?.id} onSelect={(artifact) => { setPreviewArtifactId(artifact.id); setPreviewTab("latest"); }} />}
-                        <div className="workflow-preview-summary"><div className="flex items-center justify-between gap-2"><span className="text-xs font-medium">当前产物</span><ArtifactStatus artifact={newestArtifact} compact /></div><div className="mt-1 text-[var(--fs-micro)] text-foreground/45">{newestArtifact ? `${formatDuration(selectedShot.durationMs)} · ${resolution}p · v${newestArtifact.version}` : "当前镜头还没有生成产物"}</div></div>
+                        <div className="workflow-preview-summary"><div className="flex items-center justify-between gap-2"><span className="text-xs font-medium">当前产物</span><ArtifactStatus artifact={newestArtifact} compact /></div><div className="mt-1 text-[var(--fs-micro)] text-foreground/45">{newestArtifact ? `${formatDuration(selectedShot.durationMs)} · ${formatVideoResolutionLabel(resolution)} · v${newestArtifact.version}` : "当前镜头还没有生成产物"}</div></div>
                         <div className="workflow-preview-actions"><Button icon={<RefreshCcw className="size-3.5" />} loading={generateArtifact.isPending} onClick={() => generateArtifact.mutate()}>重新生成</Button><Button icon={<Download className="size-3.5" />} disabled={!previewArtifact?.resourceId} onClick={() => previewArtifact?.resourceId && void downloadArtifact(previewArtifact, selectedShot.title, message.error)}>下载{activeStage === "video" ? "视频" : "图片"}</Button></div>
                         <ArtifactHistory artifacts={artifacts.slice(0, 4)} activeId={previewArtifact?.id} onSelect={(artifact) => setPreviewArtifactId(artifact.id)} compact />
                     </div>

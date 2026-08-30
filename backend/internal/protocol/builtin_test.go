@@ -378,6 +378,25 @@ func TestDeclarativeManifestKeepsLegacyVideoResolutionTransformCompatible(t *tes
 	}
 }
 
+func TestDeclarativeManifestKeepsAutoDLResolutionTransformCompatible(t *testing.T) {
+	tests := []struct {
+		value, ratio, expected string
+	}{
+		{value: "480", ratio: "9:16", expected: "480p竖"},
+		{value: "480p", ratio: "16:9", expected: "480p横"},
+		{value: "720", ratio: "9:16", expected: "768p竖"},
+		{value: "720p", ratio: "16:9", expected: "768p横"},
+		{value: "768P竖", ratio: "16:9", expected: "768p竖"},
+		{value: "480", ratio: "1:1", expected: "480p(1:1)"},
+	}
+	for _, test := range tests {
+		request := GenerationRequest{AspectRatio: test.ratio}
+		if actual := applyManifestTransform(test.value, "autodl-resolution", request); actual != test.expected {
+			t.Errorf("AutoDL resolution transform %q at %q = %#v, want %q", test.value, test.ratio, actual, test.expected)
+		}
+	}
+}
+
 func TestDeclarativeManifestRequiresDocumentation(t *testing.T) {
 	manifest := Manifest{
 		APIVersion: "v1",

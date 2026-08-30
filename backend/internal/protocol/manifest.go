@@ -752,6 +752,11 @@ func applyManifestTransform(value any, transform string, request GenerationReque
 		// Compatibility for already-installed 1.0.1 manifests. New plugins
 		// should declare exact enum values and use generic string transforms.
 		return normalizeLegacyManifestVideoResolution(text)
+	case "autodl-resolution", "autodl_resolution", "autodlresolution":
+		// Compatibility for installed AutoDL workflow plugins. Older canvas
+		// settings store generic numeric tiers, while AutoDL exposes oriented
+		// enum values such as 480p竖 and 768p横.
+		return normalizeAutoDLVideoResolution(text, request.AspectRatio)
 	default:
 		return value
 	}
@@ -768,6 +773,37 @@ func normalizeLegacyManifestVideoResolution(value string) string {
 		}
 	}
 	return normalized + "p"
+}
+
+func normalizeAutoDLVideoResolution(value string, aspectRatio string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return ""
+	}
+	if strings.HasSuffix(normalized, "竖") || strings.HasSuffix(normalized, "横") || strings.HasSuffix(normalized, "(1:1)") {
+		return normalized
+	}
+	orientation := "横"
+	switch strings.TrimSpace(aspectRatio) {
+	case "9:16", "3:4", "2:3":
+		orientation = "竖"
+	case "1:1":
+		orientation = "(1:1)"
+	}
+	// Canvas' generic 720p tier corresponds to the 768p enum used by these
+	// MiniMax H3 AutoDL workflows.
+	if normalized == "720" || normalized == "720p" {
+		return "768p" + orientation
+	}
+	if strings.HasSuffix(normalized, "p") {
+		return normalized + orientation
+	}
+	for _, char := range normalized {
+		if char < '0' || char > '9' {
+			return normalized
+		}
+	}
+	return normalized + "p" + orientation
 }
 
 func pathValue(payload map[string]any, path string) any {
