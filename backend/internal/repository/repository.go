@@ -56,6 +56,12 @@ func (r *Repository) Dialect() string {
 	return r.db.Dialector.Name()
 }
 
+func (r *Repository) ReleaseTaskLease(id string, owner string) error {
+	return r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(map[string]any{"lease_owner": "", "lease_expires_at": nil, "updated_at": time.Now()}).Error
+}
+
 // NextPrefixedID 在数据库事务中递增序列，避免 UUID/父子字符串拼接导致的不可读和不可排序 ID。
 // prefix 只决定展示前缀，关联关系仍由独立外键维护。
 func (r *Repository) NextPrefixedID(prefix string) (string, error) {
@@ -1131,6 +1137,7 @@ func (r *Repository) UpdateProject(project *model.Project) error {
 		"name": project.Name, "type": project.Type, "aspect_ratio": project.AspectRatio, "source_type": project.SourceType,
 		"description": project.Description, "cover_resource_id": project.CoverResourceID,
 		"style_preset_id": project.StylePresetID, "style_profile_json": project.StyleProfileJSON,
+		"default_image_model": project.DefaultImageModel, "default_video_model": project.DefaultVideoModel,
 		"status": project.Status, "revision": project.Revision, "updated_at": project.UpdatedAt,
 	}).Error
 }
@@ -1769,6 +1776,14 @@ func (r *Repository) ShotForProject(projectID string, shotID string) (*model.Sho
 		return nil, err
 	}
 	return &shot, nil
+}
+
+func (r *Repository) ShotRevisionForShot(shotID string, revisionID string) (*model.ShotRevision, error) {
+	var revision model.ShotRevision
+	if err := r.db.First(&revision, "id = ? AND shot_id = ?", revisionID, shotID).Error; err != nil {
+		return nil, err
+	}
+	return &revision, nil
 }
 
 // DeleteProjectShot 原子删除单个镜头的领域关联，并重新压紧同章节镜头顺序。
