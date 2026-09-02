@@ -9,6 +9,7 @@ import {
     ChevronDown,
     CloudUpload,
     Coins,
+    CreditCard,
     Database,
     FileClock,
     HardDrive,
@@ -71,6 +72,7 @@ const adminNavigation: Array<{ label: string; items: AdminNavigationItem[] }> = 
         label: "运营",
         items: [
             { path: "/admin/announcements", label: "系统公告", description: "发布、关闭与历史公告", icon: <BellRing className="size-4" /> },
+            { path: "/admin/payments", label: "支付充值", description: "支付渠道、订单与对账", icon: <CreditCard className="size-4" /> },
             { path: "/admin/credit-operations", label: "积分运营", description: "人工调账与异常计费", icon: <Coins className="size-4" /> },
             { path: "/admin/redemption-codes", label: "兑换码", description: "生成与查看兑换码批次", icon: <TicketCheck className="size-4" /> },
             { path: "/admin/logs", label: "请求明细", description: "上游调用与费用", icon: <FileClock className="size-4" /> },
@@ -144,7 +146,7 @@ export function AdminShell() {
                     <div className="admin-sidebar-footer shrink-0">
                         <Tooltip mouseEnterDelay={0.1} title={collapsed ? "返回创作台" : undefined} placement="right" rootClassName="app-workspace-sidebar-tooltip">
                             <NavLink
-                                to="/home"
+                                to="/"
                                 aria-label={collapsed ? "返回创作台" : undefined}
                                 className={cn("app-workspace-nav-link group flex h-8 items-center text-foreground/62 transition-colors hover:bg-surface-hover hover:text-foreground", collapsed ? "justify-center px-0" : "gap-2.5 px-2.5")}
                             >
@@ -260,7 +262,7 @@ function MobileAdminNavigation() {
             </Dropdown>
             <div className="flex shrink-0 items-center gap-1">
                 <Tooltip title="返回创作台">
-                    <Link to="/home" className="admin-mobile-navigation-action" aria-label="返回创作台">
+                    <Link to="/" className="admin-mobile-navigation-action" aria-label="返回创作台">
                         <Home className="size-4" aria-hidden="true" />
                     </Link>
                 </Tooltip>
