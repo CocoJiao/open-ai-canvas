@@ -1,4 +1,7 @@
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import { runLocalRuntimeBootstrap } from "@/services/local-runtime-bootstrap";
+import { bootstrapAppearance } from "@/services/appearance-bootstrap";
 
 runLocalRuntimeBootstrap(
     {
@@ -13,6 +16,6 @@ runLocalRuntimeBootstrap(
         },
     },
     () => {
-        void import("./application");
+        void bootstrapAppearance().finally(() => import("./application"));
     },
 );
