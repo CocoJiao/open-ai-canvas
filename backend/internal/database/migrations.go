@@ -1,6 +1,7 @@
 package database
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const CurrentSchemaVersion int64 = 8
+const CurrentSchemaVersion int64 = 43
 
 const baselineSchemaChecksum = "sha256:open-ai-canvas-schema-v1-20260830"
 const schemaMigrationAppliedAtIndexChecksum = "sha256:schema-migrations-applied-at-index-v2-20260830"
@@ -20,6 +21,14 @@ const paymentTopupChecksum = "sha256:payment-topup-v5-20260902"
 const resourcePlaybackChecksum = "sha256:resource-playback-v6-20260902"
 const assetLibraryFoldersChecksum = "sha256:asset-library-folders-v6-20260902"
 const logicalModelActiveCodeChecksum = "sha256:logical-model-active-code-v8-20260905"
+const creationRuntimeChecksum = "sha256:creation-runtime-v10-20260909"
+const authNotificationsChecksum = "sha256:auth-notifications-v35-20260924"
+const cloudAgentGeminiCacheChecksum = "sha256:cloud-agent-gemini-cache-v36-20260924"
+const cloudAgentGeminiCacheIdentityChecksum = "sha256:cloud-agent-gemini-cache-identity-v37-20260925"
+const prefixedIDSequenceReconcileChecksum = "sha256:prefixed-id-sequence-reconcile-v38-20260926"
+const skillLibraryCategoriesChecksum = "sha256:skill-library-categories-v39-20260926"
+const builtinSkillTombstonesChecksum = "sha256:builtin-skill-tombstones-v40-20260927"
+const resourceThumbnailChecksum = "sha256:resource-thumbnail-v41-20260927"
 
 const postgresSchemaMigrationLockID int64 = 73123910420260830
 
@@ -54,6 +63,229 @@ var schemaMigrations = []migration{
 	{version: 6, name: "resource_playback_variant", checksum: resourcePlaybackChecksum, apply: migrateSchemaV6},
 	{version: 7, name: "asset_library_folders", checksum: assetLibraryFoldersChecksum, apply: migrateSchemaV7},
 	{version: 8, name: "logical_model_active_code", checksum: logicalModelActiveCodeChecksum, apply: migrateSchemaV8},
+	{version: 9, name: "channel_presentation", checksum: "sha256:channel-presentation-v9-20260908", apply: migrateChannelPresentation},
+	{version: 10, name: "creation_runtime", checksum: creationRuntimeChecksum, apply: migrateSchemaV10},
+	{version: 11, name: "cloud_agent_runtime", checksum: "sha256:cloud-agent-runtime-v11-20260912", apply: func(tx *gorm.DB) error { return tx.AutoMigrate(&model.CloudAgentExecution{}) }},
+	{version: 12, name: "agent_token_charge_limit", checksum: "sha256:agent-token-charge-limit-v12-20260913", apply: migrateSchemaV12},
+	{version: 13, name: "cloud_agent_canvas_mutation", checksum: "sha256:cloud-agent-canvas-mutation-v13-20260913", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CloudAgentCanvasMutation{})
+	}},
+	{version: 14, name: "cloud_agent_recovery_control", checksum: "sha256:cloud-agent-recovery-control-v14", apply: migrateSchemaV14},
+	{version: 15, name: "agent_profiles", checksum: "sha256:agent-profiles-v15-20260914", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.AgentProfile{})
+	}},
+	{version: 16, name: "agent_lessons", checksum: "sha256:agent-lessons-v16-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.AgentLesson{})
+	}},
+	{version: 17, name: "agent_lessons_owner_index", checksum: "sha256:agent-lessons-owner-index-v17-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.AgentLesson{})
+	}},
+	{version: 18, name: "agent_memory_settings", checksum: "sha256:agent-memory-settings-v18-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.AgentMemorySetting{})
+	}},
+	{version: 19, name: "payment_plugin_version", checksum: "sha256:payment-plugin-version-v19-20260917", apply: migrateSchemaV19},
+	{version: 20, name: "banner_announcements", checksum: "sha256:banner-announcements-v20-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.BannerAnnouncement{})
+	}},
+	{version: 21, name: "banner_announcement_title_runs", checksum: "sha256:banner-announcement-title-runs-v21-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.BannerAnnouncement{})
+	}},
+	{version: 22, name: "banner_announcement_notice_type", checksum: "sha256:banner-announcement-notice-type-v22-20260917", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.BannerAnnouncement{})
+	}},
+	{version: 23, name: "canvas_revision_history", checksum: "sha256:canvas-revision-history-v23-20260918", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CanvasProject{}, &model.CanvasSnapshot{}, &model.CanvasSnapshotResource{})
+	}},
+	{version: 24, name: "channel_model_label", checksum: "sha256:channel-model-label-v24", apply: migrateChannelModelLabel},
+	{version: 25, name: "video_token_formula_snapshot", checksum: "sha256:video-token-formula-snapshot-v25", apply: migrateVideoTokenFormulaSnapshot},
+	{version: 26, name: "channel_model_description", checksum: "sha256:channel-model-description-v26", apply: migrateChannelModelDescription},
+	{version: 27, name: "channel_credit_cost", checksum: "sha256:channel-credit-cost-v27", apply: migrateChannelCreditCost},
+	{version: 28, name: "agent_execution_journal", checksum: "sha256:agent-execution-journal-v28", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CloudAgentExecution{}, &model.CloudAgentEventRecord{}, &model.CloudAgentMessageRecord{}, &model.Task{}, &model.BillingOrder{})
+	}},
+	{version: 29, name: "agent_resource_leases", checksum: "sha256:agent-resource-leases-v29-20260919", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CloudAgentResourceLease{})
+	}},
+	{version: 30, name: "builtin_tools", checksum: "sha256:builtin-tools-v30", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.Tool{})
+	}},
+	{version: 31, name: "tool_favorites", checksum: "sha256:tool-favorites-v31", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.ToolFavorite{})
+	}},
+	{version: 32, name: "channel_model_tags", checksum: "sha256:channel-model-tags-v32", apply: migrateChannelModelTags},
+	{version: 33, name: "oauth_state_accepted_terms", checksum: "sha256:oauth-state-accepted-terms-v33", apply: migrateOAuthStateAcceptedTerms},
+	{version: 34, name: "task_media_recovery", checksum: "sha256:task-media-recovery-v34", apply: func(tx *gorm.DB) error {
+		for _, field := range []string{"MediaRecoveryJSON", "MediaStage"} {
+			if !tx.Migrator().HasColumn(&model.Task{}, field) {
+				if err := tx.Migrator().AddColumn(&model.Task{}, field); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}},
+	{version: 35, name: "auth_notifications", checksum: authNotificationsChecksum, apply: migrateSchemaV35},
+	{version: 36, name: "cloud_agent_gemini_cache", checksum: cloudAgentGeminiCacheChecksum, apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CloudAgentGeminiCache{})
+	}},
+	{version: 37, name: "cloud_agent_gemini_cache_identity", checksum: cloudAgentGeminiCacheIdentityChecksum, apply: migrateCloudAgentGeminiCacheIdentity},
+	{version: 38, name: "prefixed_id_sequence_reconcile", checksum: prefixedIDSequenceReconcileChecksum, apply: migratePrefixedIDSequenceReconcile},
+	{version: 39, name: "skill_library_categories", checksum: skillLibraryCategoriesChecksum, apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.SkillLibraryCategory{}, &model.UserSkillState{})
+	}},
+	{version: 40, name: "builtin_skill_tombstones", checksum: builtinSkillTombstonesChecksum, apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.BuiltinSkillTombstone{})
+	}},
+	{version: 41, name: "resource_thumbnail", checksum: resourceThumbnailChecksum, apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.Resource{})
+	}},
+	{version: 42, name: "cloud_agent_pi_sessions", checksum: "sha256:cloud-agent-pi-sessions-v42-20260928", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.CloudAgentPiSession{})
+	}},
+	{version: 43, name: "topup_sale_strategies", checksum: "sha256:topup-sale-strategies-v43-20260929", apply: func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&model.TopupProduct{}, &model.PaymentOrder{})
+	}},
+}
+
+func migratePrefixedIDSequenceReconcile(tx *gorm.DB) error {
+	if err := tx.AutoMigrate(&model.IDSequence{}); err != nil {
+		return fmt.Errorf("创建可读 ID 序列表：%w", err)
+	}
+	return reconcilePrefixedIDSequences(tx)
+}
+
+func migrateCloudAgentGeminiCacheIdentity(tx *gorm.DB) error {
+	// v36 accidentally made cache_key globally unique while repository reads and
+	// writes are user-scoped. Remove that index before creating the explicit
+	// (user_id, cache_key) identity used by the model tags.
+	for _, name := range []string{"idx_cloud_agent_gemini_caches_cache_key", "idx_cloud_agent_gemini_cache_cache_key"} {
+		if tx.Migrator().HasIndex(&model.CloudAgentGeminiCache{}, name) {
+			if err := tx.Migrator().DropIndex(&model.CloudAgentGeminiCache{}, name); err != nil {
+				return fmt.Errorf("删除 Gemini 缓存旧唯一索引 %s：%w", name, err)
+			}
+		}
+	}
+	return tx.AutoMigrate(&model.CloudAgentGeminiCache{})
+}
+
+func migrateChannelModelTags(tx *gorm.DB) error {
+	if tx.Migrator().HasColumn(&model.ChannelModel{}, "Tags") {
+		return nil
+	}
+	return tx.Migrator().AddColumn(&model.ChannelModel{}, "Tags")
+}
+
+func migrateOAuthStateAcceptedTerms(tx *gorm.DB) error {
+	if tx.Migrator().HasColumn(&model.OAuthState{}, "AcceptedTerms") {
+		return nil
+	}
+	return tx.Migrator().AddColumn(&model.OAuthState{}, "AcceptedTerms")
+}
+
+func migrateChannelCreditCost(tx *gorm.DB) error {
+	for _, entity := range []any{&model.ChannelModelPriceTier{}, &model.BillingOrder{}} {
+		for _, column := range []string{"cost_configured", "cost_unit_price_microcredits", "cost_input_token_price_microcredits", "cost_output_token_price_microcredits", "cost_cached_token_price_microcredits"} {
+			if !tx.Migrator().HasColumn(entity, column) {
+				if err := tx.Migrator().AddColumn(entity, column); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, column := range []string{"CostBillingMode", "CostQuantity", "CostVideoFormulaTokens"} {
+		if !tx.Migrator().HasColumn(&model.BillingOrder{}, column) {
+			if err := tx.Migrator().AddColumn(&model.BillingOrder{}, column); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func migrateChannelModelDescription(tx *gorm.DB) error {
+	if tx.Migrator().HasColumn(&model.ChannelModel{}, "Description") {
+		return nil
+	}
+	return tx.Migrator().AddColumn(&model.ChannelModel{}, "Description")
+}
+
+func migrateVideoTokenFormulaSnapshot(tx *gorm.DB) error {
+	for _, field := range []string{"VideoFormulaTokens", "UsageSource"} {
+		if !tx.Migrator().HasColumn(&model.BillingOrder{}, field) {
+			if err := tx.Migrator().AddColumn(&model.BillingOrder{}, field); err != nil {
+				return fmt.Errorf("增加视频 Token 结算字段 %s：%w", field, err)
+			}
+		}
+	}
+	return nil
+}
+
+func migrateChannelModelLabel(tx *gorm.DB) error {
+	if tx.Migrator().HasColumn(&model.ChannelModel{}, "ChannelLabel") {
+		return nil
+	}
+	return tx.Migrator().AddColumn(&model.ChannelModel{}, "ChannelLabel")
+}
+
+func migrateSchemaV14(tx *gorm.DB) error {
+	if err := tx.AutoMigrate(&model.CloudAgentExecution{}); err != nil {
+		return err
+	}
+	// Keep cancellation recoverable for executions admitted before this schema.
+	// Bound memory while retaining the migration transaction's all-or-nothing semantics.
+	after := ""
+	for {
+		var runs []model.CloudAgentExecution
+		if err := tx.Where("id > ? AND status <> ?", after, "completed").Order("id ASC").Limit(100).Find(&runs).Error; err != nil {
+			return err
+		}
+		if len(runs) == 0 {
+			return nil
+		}
+		for _, run := range runs {
+			var state struct {
+				Request struct {
+					CanvasID string `json:"canvasId"`
+				} `json:"request"`
+				ActiveTaskID string `json:"activeTaskId"`
+				MediaTaskID  string `json:"mediaTaskId"`
+			}
+			// The root task ID is always a safe cancellation anchor. If an old
+			// transcript is damaged, retain a durable warning and cancel that
+			// root task during recovery instead of blocking the whole deployment.
+			updates := map[string]any{"active_task_id": run.ID}
+			if err := json.Unmarshal([]byte(run.StateJSON), &state); err != nil {
+				updates["failure_message"] = "旧 Agent 运行记录损坏，已保留根任务并进入安全收尾；请核对任务中心"
+			} else {
+				updates["canvas_id"] = state.Request.CanvasID
+				if state.ActiveTaskID != "" {
+					updates["active_task_id"] = state.ActiveTaskID
+				}
+				updates["media_task_id"] = state.MediaTaskID
+			}
+			if run.Status == "cancelled" || run.Status == "failed" {
+				updates["cleanup_pending"] = true
+			}
+			if err := tx.Model(&model.CloudAgentExecution{}).Where("id = ?", run.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+			after = run.ID
+		}
+	}
+}
+
+func migrateChannelPresentation(tx *gorm.DB) error {
+	for _, column := range []struct {
+		model any
+		field string
+	}{{&model.ModelChannel{}, "PublicAlias"}, {&model.ModelChannel{}, "SortOrder"}, {&model.ChannelModel{}, "SortOrder"}} {
+		if !tx.Migrator().HasColumn(column.model, column.field) {
+			if err := tx.Migrator().AddColumn(column.model, column.field); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func migrationsForDatabase(db *gorm.DB) ([]migration, error) {
@@ -156,6 +388,28 @@ func migrateSchemaV5(tx *gorm.DB) error {
 	return nil
 }
 
+func migrateSchemaV19(tx *gorm.DB) error {
+	for _, value := range []any{&model.PaymentProviderConfig{}, &model.PaymentOrder{}} {
+		if !tx.Migrator().HasTable(value) {
+			continue
+		}
+		if err := addPaymentPluginVersionColumn(tx, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addPaymentPluginVersionColumn(tx *gorm.DB, value any) error {
+	if tx.Migrator().HasColumn(value, "plugin_version") {
+		return nil
+	}
+	if err := tx.Migrator().AddColumn(value, "PluginVersion"); err != nil {
+		return fmt.Errorf("增加支付插件版本列：%w", err)
+	}
+	return nil
+}
+
 func migrateSchemaV6(tx *gorm.DB) error {
 	if !tx.Migrator().HasTable(&model.Resource{}) {
 		return fmt.Errorf("资源表不存在")
@@ -194,6 +448,28 @@ func migrateSchemaV8(tx *gorm.DB) error {
 	}
 	if err := tx.Exec("CREATE UNIQUE INDEX idx_logical_models_code ON logical_models(code) WHERE archived_at IS NULL").Error; err != nil {
 		return fmt.Errorf("创建前台模型活动 code 唯一索引：%w", err)
+	}
+	return nil
+}
+
+// migrateSchemaV10 只增加创作运行时表和任务幂等关联；旧任务的空 submission ID 必须继续合法。
+func migrateSchemaV10(tx *gorm.DB) error {
+	if err := tx.AutoMigrate(&model.CreationRun{}, &model.CreationSubmission{}, &model.Task{}); err != nil {
+		return fmt.Errorf("创建创作运行时结构：%w", err)
+	}
+	return nil
+}
+
+// migrateSchemaV12 为 Agent 的 Token 计费增加最终扣费上限；旧账单保持 0，继续沿用既有按 usage 结算语义。
+func migrateSchemaV12(tx *gorm.DB) error {
+	if !tx.Migrator().HasTable(&model.BillingOrder{}) {
+		return nil
+	}
+	if tx.Migrator().HasColumn(&model.BillingOrder{}, "ChargeLimitMicrocredits") {
+		return nil
+	}
+	if err := tx.Migrator().AddColumn(&model.BillingOrder{}, "ChargeLimitMicrocredits"); err != nil {
+		return fmt.Errorf("增加 Agent Token 扣费上限列：%w", err)
 	}
 	return nil
 }

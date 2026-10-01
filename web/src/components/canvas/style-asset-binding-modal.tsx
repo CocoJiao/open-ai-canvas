@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Button, Input, InputNumber, Modal, Select } from "antd";
+import { Button, Input, InputNumber } from "antd";
+import { AppModal } from "@/components/ui/product/app-modal";
 import { Switch } from "@/components/ui/base/switch";
 import { AlertTriangle, Box, Check, FileImage, Link2, Plus, Save, SlidersHorizontal, Trash2 } from "lucide-react";
 import { nanoid } from "nanoid";
+import { Select } from "@/components/ui/base/select";
 
 import {
     createStyleProfileSnapshot,
@@ -77,7 +79,7 @@ export function StyleAssetBindingModal({ open, profile, onClose, onApply }: Styl
     };
 
     return (
-        <Modal
+        <AppModal
             rootClassName="style-asset-binding-modal"
             open={open}
             title={null}
@@ -85,7 +87,7 @@ export function StyleAssetBindingModal({ open, profile, onClose, onApply }: Styl
             centered
             width="min(980px, calc(100vw - 24px))"
             onCancel={onClose}
-            styles={{ container: { padding: 0 }, body: { padding: 0 } }}
+            flush
         >
             <div className="flex max-h-dvh min-h-0 flex-col overflow-hidden bg-background text-foreground">
                 <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3 pr-12 sm:items-center sm:px-5">
@@ -169,7 +171,7 @@ export function StyleAssetBindingModal({ open, profile, onClose, onApply }: Styl
                     </div>
                 </footer>
             </div>
-        </Modal>
+        </AppModal>
     );
 }
 

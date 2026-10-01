@@ -2,10 +2,13 @@ import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { canGenerateImageInPlace, findAvailableGenerationGroupPosition, imageGenerationChildPosition, imageGenerationGroupSize } from "@/lib/canvas/canvas-generation-layout";
+import { cancelIncompleteImageBatch, hasImageBatchResult, reconcileImageBatchRoot, retireImageBatchChildren } from "@/lib/canvas/canvas-image-batch-retry";
 import { buildImageGenerationNodeTitle } from "@/lib/canvas/canvas-generation-title";
 import { nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import { canvasImageReferenceLimitError, buildImageGenerationMetadata, getGenerationCount, isGenerationCanceled, runCanvasGenerationTaskToConsumer } from "@/lib/canvas/canvas-project-generation";
+import { canvasImageReferenceLimitError, buildImageGenerationMetadata, getGenerationCount, isGenerationCanceled, resetGenerationTaskMetadata, runCanvasGenerationTaskToConsumer } from "@/lib/canvas/canvas-project-generation";
+import { imageGenerationReferenceConnections } from "@/lib/canvas/canvas-resource-references";
 import { canvasGenerationPromptMetadata } from "@/lib/canvas/canvas-generation-submission";
+import { commitProducedModel } from "@/lib/canvas/produced-model";
 import { CONTENT_MODERATION_ERROR_CODE, generationFailureMetadata, type GenerationFailureMetadata } from "@/lib/generation-error";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -21,6 +24,7 @@ export async function executeImageGeneration({
     nodeId,
     sourceNode,
     canvasNodes,
+    canvasConnections,
     prompt,
     effectivePrompt,
     generationConfig,
@@ -51,7 +55,11 @@ export async function executeImageGeneration({
     const count = getGenerationCount(generationConfig.count);
     const isConfigNode = sourceNode?.type === CanvasNodeType.Config;
     const isImageNode = sourceNode?.type === CanvasNodeType.Image;
+    const isExistingImageNode = isImageNode && hasImageBatchResult(sourceNode);
     const reuseSourceNode = canGenerateImageInPlace(sourceNode);
+    const retired = reuseSourceNode && sourceNode ? retireImageBatchChildren(sourceNode, canvasNodes, canvasConnections) : { nodes: canvasNodes, connections: canvasConnections, removedIds: [] as string[] };
+    const workingNodes = retired.nodes;
+    const workingConnections = retired.connections;
     // 已有图片生成新结果并保留旧版本；参考图只来自入边，避免把旧结果误当成自身输入。
     const referenceImages = generationContext.referenceImages;
     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
@@ -63,7 +71,7 @@ export async function executeImageGeneration({
     const imageConfig = requestedImageSize || imageDefaults;
     // auto 图生图沿用来源节点尺寸；用户明确选择比例时必须以目标比例创建节点。
     const referenceNode = referenceImages.length === 1 ? canvasNodes.find((node) => node.id === referenceImages[0].id && node.type === CanvasNodeType.Image) : undefined;
-    const imageSizeSource = requestedImageSize ? undefined : isImageNode && sourceNode?.metadata?.content ? sourceNode : referenceNode;
+    const imageSizeSource = requestedImageSize ? undefined : isExistingImageNode ? sourceNode : referenceNode;
     const outputNodeSize = imageSizeSource ? { width: imageSizeSource.width, height: imageSizeSource.height } : imageConfig;
     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
     const parentWidth = sourceNode?.width || parentConfig.width;
@@ -78,7 +86,7 @@ export async function executeImageGeneration({
         x: parentPosition.x + parentWidth + 96,
         y: parentPosition.y + parentHeight / 2 - rootHeight / 2,
     };
-    const rootPosition = reuseSourceNode ? parentPosition : findAvailableGenerationGroupPosition(canvasNodes, preferredPosition, imageGenerationGroupSize({ width: rootWidth, height: rootHeight }, outputNodeSize, childIds.length));
+    const rootPosition = reuseSourceNode ? parentPosition : findAvailableGenerationGroupPosition(workingNodes, preferredPosition, imageGenerationGroupSize({ width: rootWidth, height: rootHeight }, outputNodeSize, childIds.length));
 
     const rootNode: CanvasNodeData = {
         id: rootId,
@@ -88,7 +96,7 @@ export async function executeImageGeneration({
         width: rootWidth,
         height: rootHeight,
         metadata: {
-            ...(reuseSourceNode ? sourceNode?.metadata || {} : {}),
+            ...resetGenerationTaskMetadata(reuseSourceNode ? sourceNode?.metadata : undefined, NODE_STATUS_LOADING),
             ...canvasGenerationPromptMetadata(prompt, effectivePrompt),
             status: NODE_STATUS_LOADING,
             size: generationConfig.size,
@@ -98,10 +106,12 @@ export async function executeImageGeneration({
             batchUsesReferenceImages: referenceImages.length > 0,
             primaryImageId: undefined,
             content: reuseSourceNode ? "" : undefined,
+            storageKey: undefined,
+            assetId: undefined,
             ...generationMetadata,
             ...styleMetadata,
             ...skillMetadata,
-            imageBatchExpanded: count > 1 ? false : undefined,
+            imageBatchExpanded: count > 1 ? true : undefined,
             generationErrorCode: undefined,
             resourceReloadAvailable: undefined,
             failedPromptFingerprint: undefined,
@@ -127,13 +137,18 @@ export async function executeImageGeneration({
             failedPromptFingerprint: undefined,
         },
     }));
-    const batchConnections = [...(reuseSourceNode ? [] : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]), ...childIds.map((childId) => ({ id: nanoid(), fromNodeId: rootId, toNodeId: childId }))];
+    const connectsSelf = !isExistingImageNode || referenceImages.some((img) => img.id === nodeId);
+    const batchConnections = [
+        ...(reuseSourceNode ? [] : imageGenerationReferenceConnections(nodeId, rootId, workingNodes, workingConnections, nanoid)),
+        ...(reuseSourceNode || !connectsSelf ? [] : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]),
+        ...childIds.map((childId) => ({ id: nanoid(), fromNodeId: rootId, toNodeId: childId })),
+    ];
 
     const nextNodes: CanvasNodeData[] = [
-        ...canvasNodes.map((node) => {
+        ...workingNodes.map((node) => {
             if (node.id !== nodeId) return node;
             if (isConfigNode) return { ...node, metadata: { ...node.metadata, ...canvasGenerationPromptMetadata(prompt, effectivePrompt), status: NODE_STATUS_LOADING, errorDetails: undefined } };
-            if (reuseSourceNode) return { ...node, position: rootNode.position, width: rootNode.width, height: rootNode.height, title: rootNode.title, metadata: { ...node.metadata, ...rootNode.metadata, errorDetails: undefined } };
+            if (reuseSourceNode) return { ...node, position: rootNode.position, width: rootNode.width, height: rootNode.height, title: rootNode.title, metadata: rootNode.metadata };
             if (isImageNode) return node;
             return {
                 ...node,
@@ -150,7 +165,8 @@ export async function executeImageGeneration({
 
     setNodes(nextNodes);
     setConnections((current) => {
-        const nextConnections = [...current, ...batchConnections];
+        const removed = new Set(retired.removedIds);
+        const nextConnections = [...current.filter((connection) => !removed.has(connection.fromNodeId) && !removed.has(connection.toNodeId)), ...batchConnections];
         if (projectId) {
             useCanvasStore.getState().updateProject(projectId, { nodes: nextNodes, connections: nextConnections });
         }
@@ -198,7 +214,7 @@ export async function executeImageGeneration({
                     setNodes((current) => {
                         const child = current.find((node) => node.id === targetId);
                         const root = current.find((node) => node.id === rootId);
-                        if (!child?.metadata?.content || !root || root.metadata?.primaryImageId) return current;
+                        if (!child || !hasImageBatchResult(child) || !root || root.metadata?.primaryImageId) return current;
                         const center = { x: root.position.x + root.width / 2, y: root.position.y + root.height / 2 };
                         const geometry = root.metadata?.locked
                             ? {}
@@ -212,18 +228,21 @@ export async function executeImageGeneration({
                                 ? {
                                       ...node,
                                       ...geometry,
-                                      metadata: {
-                                          ...node.metadata,
-                                          content: child.metadata?.content,
-                                          storageKey: child.metadata?.storageKey,
-                                          mimeType: child.metadata?.mimeType,
-                                          bytes: child.metadata?.bytes,
-                                          naturalWidth: child.metadata?.naturalWidth,
-                                          naturalHeight: child.metadata?.naturalHeight,
-                                          assetId: child.metadata?.assetId,
-                                          primaryImageId: targetId,
-                                          status: NODE_STATUS_SUCCESS,
-                                      },
+                                      metadata: commitProducedModel(
+                                          {
+                                              ...node.metadata,
+                                              content: child.metadata?.content,
+                                              storageKey: child.metadata?.storageKey,
+                                              mimeType: child.metadata?.mimeType,
+                                              bytes: child.metadata?.bytes,
+                                              naturalWidth: child.metadata?.naturalWidth,
+                                              naturalHeight: child.metadata?.naturalHeight,
+                                              assetId: child.metadata?.assetId,
+                                              primaryImageId: targetId,
+                                              status: NODE_STATUS_SUCCESS,
+                                          },
+                                          child.metadata?.producedModel,
+                                      ),
                                   }
                                 : node,
                         );
@@ -253,7 +272,14 @@ export async function executeImageGeneration({
     );
     if (count > 1) finishGenerationRequest(rootId, controller);
     if (controller.signal.aborted) {
-        setNodes((current) => current.map((node) => (node.id === nodeId && isConfigNode && node.metadata?.status === NODE_STATUS_LOADING ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined } } : node)));
+        setNodes((current) => {
+            const cancelled = cancelIncompleteImageBatch(rootId, childIds, current, []);
+            if (cancelled.removedIds.length) {
+                const removed = new Set(cancelled.removedIds);
+                setConnections((connections) => connections.filter((connection) => !removed.has(connection.fromNodeId) && !removed.has(connection.toNodeId)));
+            }
+            return cancelled.nodes.map((node) => (node.id === nodeId && isConfigNode && node.metadata?.status === NODE_STATUS_LOADING ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined } } : node));
+        });
         return;
     }
     if (hasFailure) showError(hasSuccess ? "部分图片生成失败" : "全部图片生成失败");
@@ -270,6 +296,7 @@ export async function executeImageGeneration({
                 };
             }
             if (node.id === rootId) {
+                if (count > 1) return reconcileImageBatchRoot(node, current);
                 return {
                     ...node,
                     metadata: {

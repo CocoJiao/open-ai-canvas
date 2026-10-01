@@ -5,6 +5,7 @@ import { activeConnectionPath, canvasConnectionPath } from "@/components/canvas/
 import type { CanvasBatchConnectionPreview } from "@/lib/canvas/canvas-batch-connection";
 import { subscribeCanvasGraphicsViewportPreview, subscribeCanvasNodeDragPreview, subscribeCanvasSelectionPreview, type CanvasNodeDragPreview } from "@/lib/canvas/canvas-live-viewport";
 import { calculateCanvasPreviewTransform, sameCanvasViewport, shouldRebaseCanvasRaster } from "@/lib/canvas/canvas-leafer-viewport";
+import { offsetSelectedNodeBounds } from "@/lib/canvas/canvas-selection";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasDisplayConnection, CanvasNodeData, ConnectionHandle, Position, SelectionBox, ViewportTransform } from "@/types/canvas";
 
@@ -57,6 +58,7 @@ type OverlayScene = LeaferScene & {
     guides: Path;
     draft: Path;
     batchDrafts: Group;
+    dragPreview: CanvasNodeDragPreview | null;
 };
 
 export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps) {
@@ -66,6 +68,7 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
     const overlayRef = useRef<OverlayScene | null>(null);
     const viewportRef = useRef(props.viewport);
     const rasterViewportRef = useRef(props.viewport);
+    const containerSizeRef = useRef({ width: 1, height: 1 });
     const propsRef = useRef(props);
     propsRef.current = props;
 
@@ -78,12 +81,14 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
 
         const underlay = createUnderlayScene(underlayHost);
         const overlay = createOverlayScene(overlayHost);
+        containerSizeRef.current = { width: Math.max(1, container.clientWidth), height: Math.max(1, container.clientHeight) };
         underlayRef.current = underlay;
         overlayRef.current = overlay;
 
         const resize = () => {
             const rect = container.getBoundingClientRect();
-            const size = { width: Math.max(1, rect.width), height: Math.max(1, rect.height), pixelRatio: canvasPixelRatio() };
+            containerSizeRef.current = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
+            const size = { ...containerSizeRef.current, pixelRatio: canvasPixelRatio() };
             underlay.leafer.resize(size);
             overlay.leafer.resize(size);
             syncViewport(rasterViewportRef.current, size.width, size.height, underlay, overlay, propsRef.current);
@@ -96,10 +101,9 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
         window.addEventListener("resize", resize);
         const unsubscribe = subscribeCanvasGraphicsViewportPreview(container, (next) => {
             viewportRef.current = next;
-            const rect = container.getBoundingClientRect();
             if (isViewportPreview(container, next, rasterViewportRef.current)) {
                 if (shouldRebaseCanvasRaster(next, rasterViewportRef.current)) {
-                    syncViewport(next, rect.width, rect.height, underlay, overlay, propsRef.current);
+                    syncViewport(next, containerSizeRef.current.width, containerSizeRef.current.height, underlay, overlay, propsRef.current);
                     rasterViewportRef.current = next;
                     forceSceneRender(underlay, overlay);
                     resetScenePreview(underlay, overlay);
@@ -110,7 +114,7 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
             }
             resetScenePreview(underlay, overlay);
             if (sameCanvasViewport(next, rasterViewportRef.current)) return;
-            syncViewport(next, rect.width, rect.height, underlay, overlay, propsRef.current);
+            syncViewport(next, containerSizeRef.current.width, containerSizeRef.current.height, underlay, overlay, propsRef.current);
             rasterViewportRef.current = next;
         });
         const unsubscribeSelection = subscribeCanvasSelectionPreview(container, (selection) => {
@@ -118,6 +122,8 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
         });
         const unsubscribeNodeDrag = subscribeCanvasNodeDragPreview(container, (preview) => {
             applyConnectionDragPreview(underlay, propsRef.current, preview);
+            overlay.dragPreview = preview;
+            syncLiveSelectionBounds(overlay, propsRef.current, viewportRef.current.k);
         });
         resize();
 
@@ -152,10 +158,9 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
         const container = props.containerRef.current;
         if (!underlay || !overlay || !container) return;
         viewportRef.current = props.viewport;
-        const rect = container.getBoundingClientRect();
         const hadPreview = hasScenePreview(underlay, overlay);
         if (hadPreview || !sameCanvasViewport(props.viewport, rasterViewportRef.current)) {
-            syncViewport(props.viewport, rect.width, rect.height, underlay, overlay, props);
+            syncViewport(props.viewport, containerSizeRef.current.width, containerSizeRef.current.height, underlay, overlay, props);
         }
         rasterViewportRef.current = props.viewport;
         // 新视口先同步到真实 DPR backing store，再撤销交互期的合成变换，避免出现跳帧。
@@ -168,8 +173,7 @@ export function CanvasLeaferGraphicsLayer(props: CanvasLeaferGraphicsLayerProps)
         const overlay = overlayRef.current;
         const container = props.containerRef.current;
         if (!underlay || !overlay || !container) return;
-        const rect = container.getBoundingClientRect();
-        syncViewport(rasterViewportRef.current, rect.width, rect.height, underlay, overlay, props);
+        syncViewport(rasterViewportRef.current, containerSizeRef.current.width, containerSizeRef.current.height, underlay, overlay, props);
         if (isViewportPreview(container, viewportRef.current, rasterViewportRef.current)) {
             applyScenePreview(viewportRef.current, rasterViewportRef.current, underlay, overlay);
         }
@@ -206,7 +210,7 @@ function createOverlayScene(host: HTMLDivElement): OverlayScene {
     world.add(draft);
     world.add(batchDrafts);
     leafer.add(world);
-    return { leafer, world, host, selection, selectionBounds, guides, draft, batchDrafts };
+    return { leafer, world, host, selection, selectionBounds, guides, draft, batchDrafts, dragPreview: null };
 }
 
 function rebuildConnections(scene: UnderlayScene, props: CanvasLeaferGraphicsLayerProps) {
@@ -278,10 +282,10 @@ function syncConnectionPath(entry: ConnectionSceneEntry, props: CanvasLeaferGrap
     entry.path.set({
         path: canvasConnectionPath(entry.connection, from, to, props.scriptScrollTopById[entry.from.id] || 0, props.scriptScrollTopById[entry.to.id] || 0).pathD,
         stroke: emphasized ? props.theme.accent.primary : props.theme.node.muted,
-        strokeWidth: emphasized ? 1.6 : 1,
+        strokeWidth: emphasized ? 2.8 : 2,
         strokeScaleFixed: true,
         strokeCap: "round",
-        opacity: emphasized ? 0.52 : 0.24,
+        opacity: emphasized ? 0.95 : 0.8,
         hittable: false,
     });
 }
@@ -323,7 +327,7 @@ function syncOverlayContent(scene: OverlayScene, props: CanvasLeaferGraphicsLaye
     const bounds = props.selectedNodeBounds;
     scene.selectionBounds.visible = Boolean(bounds && !selection);
     if (bounds && !selection) {
-        syncSelectionBounds(scene.selectionBounds, bounds, viewportScale);
+        syncSelectionBounds(scene.selectionBounds, liveSelectedNodeBounds(bounds, scene.dragPreview), viewportScale);
         scene.selectionBounds.stroke = props.theme.node.label;
     }
 
@@ -388,7 +392,7 @@ function syncViewport(viewport: ViewportTransform, width: number, height: number
         cornerRadius: 2 / scale,
         dashPattern: [4 / scale, 4 / scale],
     });
-    if (props.selectedNodeBounds) syncSelectionBounds(overlay.selectionBounds, props.selectedNodeBounds, scale);
+    if (props.selectedNodeBounds) syncSelectionBounds(overlay.selectionBounds, liveSelectedNodeBounds(props.selectedNodeBounds, overlay.dragPreview), scale);
     overlay.selectionBounds.set({
         strokeWidth: 1 / scale,
         cornerRadius: 2 / scale,
@@ -436,6 +440,19 @@ function resetScenePreview(...scenes: LeaferScene[]) {
 
 function forceSceneRender(...scenes: LeaferScene[]) {
     for (const scene of scenes) scene.leafer.forceRender(undefined, true);
+}
+
+function liveSelectedNodeBounds(bounds: NonNullable<NodeBounds>, preview: CanvasNodeDragPreview | null) {
+    return offsetSelectedNodeBounds(bounds, preview);
+}
+
+function syncLiveSelectionBounds(scene: OverlayScene, props: CanvasLeaferGraphicsLayerProps, viewportScale: number) {
+    const bounds = props.selectedNodeBounds;
+    const selection = props.selectionBox;
+    scene.selectionBounds.visible = Boolean(bounds && !selection);
+    if (!bounds || selection) return;
+    syncSelectionBounds(scene.selectionBounds, liveSelectedNodeBounds(bounds, scene.dragPreview), viewportScale);
+    scene.selectionBounds.stroke = props.theme.node.label;
 }
 
 function syncSelectionBounds(rect: Rect, bounds: NonNullable<NodeBounds>, viewportScale: number) {

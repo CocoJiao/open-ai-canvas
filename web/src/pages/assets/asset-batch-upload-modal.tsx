@@ -1,14 +1,15 @@
 import { useMemo, useRef, useState } from "react";
-import { App, Button, Modal, Progress, Select } from "antd";
+import { App, Button, Modal, Progress } from "antd";
 import { StatusBadge } from "@/components/ui/base/badges";
 import { FileImage, UploadCloud, X } from "lucide-react";
 
 import { ASSET_CATEGORY_OPTIONS, type AssetCategory } from "@/lib/asset-category";
 import { readImageMeta } from "@/lib/image-utils";
 import { uploadImage } from "@/services/image-storage";
-import { saveRemoteUserDataNow } from "@/services/user-data-sync";
+import { localSavedRemotePendingMessage, saveRemoteUserDataNow } from "@/services/user-data-sync";
 import { flushAssetStorePersistence, useAssetStore } from "@/stores/use-asset-store";
 import type { AssetFolder } from "@/services/api/user-data";
+import { Select } from "@/components/ui/base/select";
 
 type BatchItem = { id: string; file: File; status: "queued" | "uploading" | "done" | "error"; error?: string; percent?: number };
 
@@ -58,8 +59,8 @@ export function AssetBatchUploadModal({ open, defaultFolderId, folders, onClose,
         await flushAssetStorePersistence();
         try {
             await saveRemoteUserDataNow();
-        } catch {
-            message.warning("部分素材已保存在本地，稍后自动同步至云端");
+        } catch (error) {
+            message.warning(localSavedRemotePendingMessage("部分素材已保存在本地", error));
         }
         setUploading(false);
         await onComplete();

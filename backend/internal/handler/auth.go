@@ -7,10 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +20,8 @@ import (
 )
 
 func RegisterAuthRoutes(r *gin.RouterGroup, svc *service.Service) {
+	registerChannelOrderRoutes(r, svc)
+	registerNotificationRoutes(r, svc)
 	r.GET("/auth/settings", func(c *gin.Context) {
 		settings, err := svc.PublicAuthSettings()
 		if err != nil {
@@ -59,6 +60,9 @@ func RegisterAuthRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		policy, available := loadRuntimePolicy(c, svc)
 		if !available || !enforceRateLimit(c, "email-code:"+c.ClientIP(), policy.Request.EmailCodePerHour, time.Hour) {
+			return
+		}
+		if !enforceRateLimit(c, "registration-email-account:"+passwordResetRateLimitSubject(req.Email), 10, time.Hour) {
 			return
 		}
 		if err := svc.SendRegistrationEmailCode(req.Email); err != nil {
@@ -135,7 +139,8 @@ func RegisterAuthRoutes(r *gin.RouterGroup, svc *service.Service) {
 		if !enforceRateLimit(c, "linuxdo-start:"+c.ClientIP(), 20, 10*time.Minute) {
 			return
 		}
-		target, err := svc.BeginLinuxDOLogin(c.Query("next"))
+		acceptedTerms := c.Query("acceptedTerms") == "true"
+		target, err := svc.BeginLinuxDOLogin(c.Query("next"), acceptedTerms)
 		if err != nil {
 			failService(c, err)
 			return
@@ -159,11 +164,6 @@ func RegisterAuthRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		logicalModels, logicalModelsErr := svc.PublicLogicalModels(nil)
-		if logicalModelsErr != nil {
-			failService(c, logicalModelsErr)
-			return
-		}
 		limits, err := svc.PublicRuntimeLimits()
 		if err != nil {
 			failService(c, err)
@@ -179,7 +179,7 @@ func RegisterAuthRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		ok(c, gin.H{"user": publicUser, "logicalModels": logicalModels, "runtimeLimits": limits, "drawingEngine": drawingEngine, "features": features})
+		ok(c, gin.H{"user": publicUser, "runtimeLimits": limits, "drawingEngine": drawingEngine, "features": features})
 	})
 	r.GET("/channels/system", func(c *gin.Context) {
 		actor, err := currentUser(c, svc)
@@ -221,569 +221,10 @@ func linuxDOCallbackHandler(svc *service.Service) gin.HandlerFunc {
 }
 
 func RegisterAdminRoutes(r *gin.RouterGroup, svc *service.Service) {
-	r.GET("/admin/users", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		users, err := svc.AdminUsers(user, service.AdminListQuery{Keyword: c.Query("keyword"), Type: c.Query("role"), Status: c.Query("status"), Page: page, Limit: limit})
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, users)
-	})
-	r.POST("/admin/users", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.CreateAdminUserRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		created, err := svc.CreateAdminUser(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"user": created})
-	})
-	r.GET("/admin/references", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		data, err := svc.AdminReferences(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, data)
-	})
-	r.POST("/admin/users/bulk-disable", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.BulkDisableUsersRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		result, err := svc.BulkDisableUsers(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/users/:id/detail", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		result, err := svc.AdminUserDetail(user, c.Param("id"))
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/users/:id/ledger", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		result, err := svc.AdminUserLedger(user, c.Param("id"), c.Query("type"), page, limit)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/users/:id/tasks", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		result, err := svc.AdminUserTasks(user, c.Param("id"), page, limit)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/users/:id/audit-events", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		result, err := svc.AdminUserAuditEvents(user, c.Param("id"), page, limit)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.PATCH("/admin/users/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		var req service.UpdateUserRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		updated, err := svc.UpdateUser(user, c.Param("id"), req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"user": updated})
-	})
-	r.DELETE("/admin/users/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		if err := svc.DeleteUser(user, c.Param("id")); err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"ok": true})
-	})
-	r.GET("/admin/channels", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		channels, err := svc.AdminSystemChannelPage(user, service.AdminListQuery{Keyword: c.Query("keyword"), Status: c.Query("status"), Page: page, Limit: limit})
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, channels)
-	})
-	r.POST("/admin/channels", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		var req service.ChannelRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		channel, err := svc.CreateSystemChannel(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"channel": channel})
-	})
-	r.PATCH("/admin/channels/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		var req service.ChannelRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		channel, err := svc.UpdateSystemChannel(user, c.Param("id"), req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"channel": channel})
-	})
-	r.DELETE("/admin/channels/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		if err := svc.DeleteSystemChannel(user, c.Param("id")); err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"ok": true})
-	})
-	r.GET("/admin/prompt-templates", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		templates, definitions, err := svc.AdminPromptTemplates(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"templates": templates, "definitions": definitions})
-	})
-	r.POST("/admin/prompt-templates", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.PromptTemplateRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		template, err := svc.CreatePromptTemplate(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"template": template})
-	})
-	r.PATCH("/admin/prompt-templates/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.PromptTemplateRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		template, err := svc.UpdatePromptTemplate(user, c.Param("id"), req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"template": template})
-	})
-	r.DELETE("/admin/prompt-templates/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		if err := svc.DeletePromptTemplate(user, c.Param("id")); err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"ok": true})
-	})
-	r.GET("/admin/settings/oss", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.AdminOSSSetting(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.PATCH("/admin/settings/oss", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.OSSSettingRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		setting, err := svc.UpdateOSSSetting(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.POST("/admin/settings/oss/test", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		if !enforceRateLimit(c, "admin-storage-test:"+user.ID, 6, time.Minute) {
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.OSSSettingRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		result, err := svc.TestAdminOSSSetting(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/settings/ark-private-assets", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.AdminArkPrivateAssetSetting(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.PATCH("/admin/settings/ark-private-assets", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		var req service.ArkPrivateAssetSettingRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		setting, err := svc.UpdateArkPrivateAssetSetting(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.GET("/admin/settings/drawing-engine", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.AdminDrawingEngineSetting(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.PATCH("/admin/settings/drawing-engine", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		var req service.DrawingEngineSetting
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		setting, err := svc.UpdateDrawingEngineSetting(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.GET("/admin/settings/runtime-policy", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.AdminRuntimePolicySetting(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.GET("/admin/settings/runtime-policy/self-use", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.AdminSelfUseRuntimePolicy(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.PUT("/admin/settings/runtime-policy", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
-		var req service.RuntimePolicySetting
-		if err := c.ShouldBindJSON(&req); err != nil {
-			fail(c, http.StatusBadRequest, err)
-			return
-		}
-		setting, err := svc.UpdateRuntimePolicySetting(user, req)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.DELETE("/admin/settings/runtime-policy", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		setting, err := svc.ResetRuntimePolicySetting(user)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"setting": setting})
-	})
-	r.GET("/admin/api-logs", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		logs, err := svc.AdminAPICallLogs(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), Keyword: c.Query("keyword"), Status: c.Query("status"), Page: page, Limit: limit})
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, logs)
-	})
-	r.GET("/admin/api-logs/:id/media", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		delivery, err := svc.PrepareAdminAPICallLogMediaDelivery(user, c.Param("id"), c.GetHeader("Range"))
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		if delivery.RedirectURL != "" {
-			c.Header("Cache-Control", "private, no-store")
-			c.Header("Referrer-Policy", "no-referrer")
-			c.Header("X-Content-Type-Options", "nosniff")
-			c.Redirect(http.StatusTemporaryRedirect, delivery.RedirectURL)
-			return
-		}
-		stream := delivery.Stream
-		defer stream.Body.Close()
-		resource := stream.Resource
-		mimeType := resource.MimeType
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
-		c.Header("Cache-Control", "private, no-cache")
-		c.Header("Accept-Ranges", "bytes")
-		c.Header("X-Content-Type-Options", "nosniff")
-		if c.Query("download") == "1" {
-			extension := filepath.Ext(resource.ObjectKey)
-			if len(extension) > 12 {
-				extension = ""
-			}
-			c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=api-log-media%s", extension))
-		}
-		if resource.Provider == "local" {
-			if seeker, ok := stream.Body.(io.ReadSeeker); ok {
-				c.Header("Content-Type", mimeType)
-				http.ServeContent(c.Writer, c.Request, resource.ID, resource.UpdatedAt, seeker)
-				return
-			}
-		}
-		if stream.ContentRange != "" {
-			c.Header("Content-Range", stream.ContentRange)
-		}
-		if stream.AcceptRanges != "" {
-			c.Header("Accept-Ranges", stream.AcceptRanges)
-		}
-		c.DataFromReader(stream.StatusCode, stream.ContentLength, mimeType, stream.Body, nil)
-	})
-	r.GET("/admin/api-logs/:id", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		log, err := svc.AdminAPICallLog(user, c.Param("id"))
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, gin.H{"log": log})
-	})
-	r.POST("/admin/api-logs/:id/query-task", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		result, err := svc.AdminQueryFailedVideoTask(c.Request.Context(), user, c.Param("id"))
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		ok(c, result)
-	})
-	r.GET("/admin/api-logs-export.csv", func(c *gin.Context) {
-		user, err := currentUser(c, svc)
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		selectedIDs := []string(nil)
-		if value := strings.TrimSpace(c.Query("ids")); value != "" {
-			selectedIDs = strings.Split(value, ",")
-		}
-		data, err := svc.AdminAPICallLogsCSV(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), Keyword: c.Query("keyword"), Status: c.Query("status"), IDs: selectedIDs})
-		if err != nil {
-			failService(c, err)
-			return
-		}
-		c.Header("Content-Disposition", "attachment; filename=api-calls-"+time.Now().UTC().Format("20060102-150405")+".csv")
-		c.Data(http.StatusOK, "text/csv; charset=utf-8", data)
-	})
+	registerAdminUserRoutes(r, svc)
+	registerAdminChannelRoutes(r, svc)
+	registerAdminSettingRoutes(r, svc)
+	registerAdminAPILogRoutes(r, svc)
 }
 
 func RegisterSystemProxyRoutes(r *gin.RouterGroup, svc *service.Service) {
@@ -849,7 +290,7 @@ func shortSystemProxyPath(rawPath string) (string, string, bool) {
 // as a channel request when a business route returns 404.
 func isReservedAPIPathPrefix(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "admin", "ai", "announcements", "assets", "auth", "canvas-projects", "channels", "diagnostics", "features", "files", "model-catalog", "models", "oauth", "plugins", "projects", "public", "resources", "sessions", "settings", "skills", "style-profiles", "tasks", "timeline", "user-data", "voice-profiles", "wallet":
+	case "admin", "agent", "ai", "announcements", "banner-announcements", "assets", "auth", "canvas-projects", "channels", "diagnostics", "features", "files", "model-catalog", "models", "oauth", "plugins", "projects", "public", "resources", "sessions", "settings", "skills", "style-profiles", "tasks", "timeline", "user-data", "voice-profiles", "wallet":
 		return true
 	default:
 		return false
@@ -927,9 +368,8 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 	if encodedQuery := query.Encode(); encodedQuery != "" {
 		target += "?" + encodedQuery
 	}
-	validatedTarget, err := svc.ValidateChannelOutboundURL(target, channel.AllowLocalChannel, false)
+	validatedTarget, err := svc.ValidateChannelOutboundURL(target)
 	if err != nil {
-		_ = svc.RefundBilling(billingOrderID, "系统渠道地址校验失败")
 		failService(c, err)
 		return
 	}
@@ -957,7 +397,7 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 		if order != nil {
 			billingOrderID = order.ID
 			if err := svc.MarkBillingRunning(billingOrderID); err != nil {
-				_ = svc.RefundBilling(billingOrderID, "系统渠道请求尚未发出")
+				refundSystemProxyBilling(svc, billingOrderID, "系统渠道请求尚未发出")
 				failService(c, err)
 				return
 			}
@@ -965,7 +405,7 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 	}
 	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, validatedTarget.String(), bytes.NewReader(body))
 	if err != nil {
-		_ = svc.RefundBilling(billingOrderID, "系统渠道请求构造失败")
+		refundSystemProxyBilling(svc, billingOrderID, "系统渠道请求构造失败")
 		fail(c, http.StatusBadRequest, err)
 		return
 	}
@@ -989,11 +429,11 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 	status := model.ApiCallStatusSucceeded
 	statusCode := 0
 	errorText := ""
-	resp, err := svc.OutboundHTTPClientForChannel(35*time.Minute, validatedTarget, channel.AllowLocalChannel).Do(upstreamReq)
+	resp, err := svc.OutboundHTTPClientForChannel(35*time.Minute, validatedTarget).Do(upstreamReq)
 	if err != nil {
 		status = model.ApiCallStatusFailed
 		errorText = err.Error()
-		_ = svc.MarkBillingUncertain(billingOrderID, "系统渠道连接中断，费用状态待核对")
+		markSystemProxyBillingUncertain(svc, billingOrderID, "系统渠道连接中断，费用状态待核对")
 		logSystemProxyCall(svc, apiCallLog(user, channel, billingOrderID, capability, protocol, c.Request.Method, path, target, body, c.GetHeader("Content-Type"), status, statusCode, time.Since(startedAt), errorText, concurrencyLimit), nil)
 		fail(c, http.StatusBadGateway, errors.New("系统渠道连接失败"))
 		return
@@ -1019,7 +459,7 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 		if errors.Is(readErr, errSystemProxyResponseTooLarge) {
 			billingNote = "上游已响应但流式响应体超过限制，费用状态待核对"
 		}
-		_ = svc.MarkBillingUncertain(billingOrderID, billingNote)
+		markSystemProxyBillingUncertain(svc, billingOrderID, billingNote)
 		logSystemProxyCall(svc, apiCallLog(user, channel, billingOrderID, capability, protocol, c.Request.Method, path, target, body, c.GetHeader("Content-Type"), status, statusCode, time.Since(startedAt), errorText, concurrencyLimit), responseBody)
 		// SSE 响应头已经发送，流中断后只能关闭连接；非流式响应仍返回结构化错误。
 		if !streamed {
@@ -1028,27 +468,47 @@ func proxySystemRequestPath(c *gin.Context, svc *service.Service, user *model.Us
 		return
 	}
 	if int64(len(responseBody)) > responseLimit {
-		_ = svc.MarkBillingUncertain(billingOrderID, "上游已响应但响应体超过限制，费用状态待核对")
+		markSystemProxyBillingUncertain(svc, billingOrderID, "上游已响应但响应体超过限制，费用状态待核对")
 		fail(c, http.StatusBadGateway, fmt.Errorf("系统渠道响应超过 %dMB 限制", policy.Request.SystemRelayResponseMB))
 		return
 	}
 	logErr := logSystemProxyCall(svc, apiCallLog(user, channel, billingOrderID, capability, protocol, c.Request.Method, path, target, body, c.GetHeader("Content-Type"), status, statusCode, time.Since(startedAt), errorText, concurrencyLimit), responseBody)
 	if status == model.ApiCallStatusSucceeded {
 		if logErr != nil {
-			_ = svc.MarkBillingUncertain(billingOrderID, "上游成功但调用日志写入失败，费用状态待核对")
+			markSystemProxyBillingUncertain(svc, billingOrderID, "上游成功但调用日志写入失败，费用状态待核对")
 		} else if err := svc.SettleBilling(billingOrderID, ""); err != nil {
-			_ = svc.MarkBillingUncertain(billingOrderID, "上游成功但积分结算失败："+err.Error())
+			markSystemProxyBillingUncertain(svc, billingOrderID, "上游成功但积分结算失败："+err.Error())
 		}
 	} else if statusCode == 524 {
-		_ = svc.MarkBillingUncertain(billingOrderID, "上游返回 524，费用状态待核对")
+		markSystemProxyBillingUncertain(svc, billingOrderID, "上游返回 524，费用状态待核对")
 	} else {
-		_ = svc.RefundBilling(billingOrderID, "上游明确返回失败")
+		refundSystemProxyBilling(svc, billingOrderID, "上游明确返回失败")
 	}
 	if streamed {
 		return
 	}
 	copySystemProxyResponseHeaders(c, resp)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), responseBody)
+}
+
+func refundSystemProxyBilling(svc *service.Service, billingOrderID string, reason string) {
+	if billingOrderID == "" {
+		return
+	}
+	if err := svc.RefundBilling(billingOrderID, reason); err != nil {
+		log.Printf("system proxy billing refund failed: billing_order_id=%s error=%v", billingOrderID, err)
+		// 退款写失败不能当没发生：转待核对，避免订单停在 running 被当成已扣费。
+		markSystemProxyBillingUncertain(svc, billingOrderID, "退款失败，费用状态待核对："+err.Error())
+	}
+}
+
+func markSystemProxyBillingUncertain(svc *service.Service, billingOrderID string, reason string) {
+	if billingOrderID == "" {
+		return
+	}
+	if err := svc.MarkBillingUncertain(billingOrderID, reason); err != nil {
+		log.Printf("system proxy billing uncertainty update failed: billing_order_id=%s error=%v", billingOrderID, err)
+	}
 }
 
 func apiCallLog(user *model.User, channel *model.ModelChannel, billingOrderID string, capability string, protocol model.ChannelInterfaceType, method string, path string, target string, body []byte, contentType string, status model.ApiCallStatus, statusCode int, duration time.Duration, errorText string, concurrencyLimit int) model.ApiCallLog {

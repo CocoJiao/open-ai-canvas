@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import { applySkinTheme, DEFAULT_CLASSIC_SKIN, duplicateSkinDefinition, getSkinAntOverrides, normalizeSkinDefinition, skinSwatches, SKIN_COLOR_GROUPS, SKIN_COMPONENT_NUMBER_FIELDS } from "../src/lib/skin-themes";
 import { normalizePublicAppearance } from "../src/stores/use-appearance-store";
+import { moduleGroupSource } from "./helpers/module-group-source";
 
 describe("site appearance and editable skin library", () => {
-    test("classic is immutable and keeps the existing runtime token system unchanged", () => {
+    test("classic preserves foundation tokens and applies only primary button fills", () => {
         expect(DEFAULT_CLASSIC_SKIN.locked).toBe(true);
         expect(getSkinAntOverrides(DEFAULT_CLASSIC_SKIN, "light")).toEqual({});
         expect(getSkinAntOverrides(DEFAULT_CLASSIC_SKIN, "dark")).toEqual({});
@@ -22,7 +23,9 @@ describe("site appearance and editable skin library", () => {
         } as unknown as Document;
         applySkinTheme(DEFAULT_CLASSIC_SKIN, "light", target);
         expect(removed.length).toBeGreaterThan(60);
-        expect(assigned.size).toBe(0);
+        expect(assigned.size).toBe(4);
+        expect(assigned.get("--button-primary-bg")).toBe("linear-gradient(115deg, #6554df, #386fbc)");
+        expect(assigned.has("--background")).toBe(false);
         expect(target.documentElement.dataset.skin).toBe("classic");
     });
 
@@ -132,7 +135,7 @@ describe("site appearance and editable skin library", () => {
         const [storeSource, footerSource, pageSource, editorSource, globalStyles, adminStyles] = await Promise.all([
             Bun.file(new URL("../src/stores/use-appearance-store.ts", import.meta.url)).text(),
             Bun.file(new URL("../src/components/layout/site-compliance-footer.tsx", import.meta.url)).text(),
-            Bun.file(new URL("../src/pages/admin/settings/appearance-settings-page.tsx", import.meta.url)).text(),
+            Promise.resolve(moduleGroupSource("pages/admin/settings/appearance-settings-page.tsx")),
             Bun.file(new URL("../src/pages/admin/settings/components/skin-theme-editor.tsx", import.meta.url)).text(),
             Bun.file(new URL("../src/styles/globals.css", import.meta.url)).text(),
             Bun.file(new URL("../src/styles/admin-ui.css", import.meta.url)).text(),
@@ -142,7 +145,7 @@ describe("site appearance and editable skin library", () => {
         expect(storeSource).toContain('setMeta(targetDocument, "property", "og:title"');
         expect(footerSource).toContain("https://beian.miit.gov.cn/");
         expect(footerSource).toContain('rel="noopener noreferrer"');
-        expect(pageSource).toContain('title="5. 皮肤主题"');
+        expect(pageSource).toContain('title="皮肤主题"');
         expect(editorSource).toContain("从默认新建");
         expect(editorSource).toContain("复制当前");
         expect(editorSource).toContain("删除这套主题");
@@ -159,7 +162,7 @@ describe("site appearance and editable skin library", () => {
         expect(globalStyles).toContain("--ant-tooltip-overlay-color: var(--popover-foreground) !important");
         expect(globalStyles).toContain(":where(.ant-tooltip-container, .ant-tooltip-inner)");
         expect(globalStyles).toContain("color: var(--popover-foreground) !important");
-        expect(adminStyles).toContain("--admin-status-warning: var(--palette-status-warning)");
+        expect(adminStyles).toContain("var(--admin-status-warning)");
         expect(adminStyles).toContain("border-radius: var(--menu-radius);");
     });
 });

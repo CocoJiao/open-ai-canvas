@@ -2,10 +2,11 @@ import { ImageSizePicker } from "@/components/image-size-picker";
 import { imageResolutionUsesQuality } from "@/lib/image-size-presets";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { App, Button, Form, Image, Input, InputNumber, Modal, Select } from "antd";
+import { App, Button, Form, Image, Input, InputNumber } from "antd";
 import { SegmentedControl } from "@/components/ui/base/segmented-control";
 import { EmptyState } from "@/components/ui/product/empty-state";
 import { StatusBadge } from "@/components/ui/base/badges";
+import { AppModal } from "@/components/ui/product/app-modal/app-modal";
 import { Box, ChevronDown, ChevronLeft, ChevronRight, Download, Film, Image as ImageIcon, Layers3, List, Maximize2, Play, Plus, RefreshCcw, Save, Search, SlidersHorizontal, Trash2, UsersRound, WandSparkles, X } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
@@ -14,12 +15,13 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ModelPicker } from "@/components/model-picker";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationOptions } from "@/lib/model-capabilities";
-import { modelQuoteRequest } from "@/lib/model-pricing";
+import { modelQuoteDescription, modelQuoteRequest } from "@/lib/model-pricing";
 import { customShotTitle, formatShotOrdinal, normalizeDefaultShotTitle } from "@/lib/shot-label";
 import { modelCompatibilityError, resolveCompatibleModel, resolveModelVideoBooleanOptions, type ModelRequirements } from "@/lib/model-selection";
 import { submitBackendGenerationTask } from "@/services/api/generation-task";
-import { quoteLogicalModel } from "@/services/api/logical-models";
+import { quoteModel, type LogicalModelQuote } from "@/services/api/logical-models";
 import { type GenerationTask } from "@/services/api/task-center";
+import { downloadBrowserMedia } from "@/services/browser-download";
 import {
     createUnitWorkflow,
     deleteProjectShot,
@@ -35,7 +37,7 @@ import {
     type ShotRevisionInput,
     type WorkflowStep,
 } from "@/services/api/projects";
-import { resourceFileUrl, resourceIdFromStorageKey } from "@/services/api/resources";
+import { resourceFileUrl, resourceIdFromStorageKey, resourceStorageKey } from "@/services/api/resources";
 import { skillRuntime } from "@/services/skill-runtime";
 import { configuredModelMatchesCapability, modelDisplayName, modelOptionName, resolveModelChannel, selectableModelsByCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
@@ -52,6 +54,7 @@ import {
     type ShortDramaWorkflowStage,
 } from "./workflow-shared";
 import { buildShotAssetReferenceContext, ensureShotAssetMentionPrompt, resolveShotAssetMentionPrompt } from "./workflow-shot-references";
+import { Select } from "@/components/ui/base/select";
 
 type ShotEditorValues = Omit<ShotRevisionInput, "durationMs"> & {
     title: string;
@@ -185,8 +188,8 @@ export default function WorkflowProductionWorkbench(props: Props) {
     });
     const quoteRequest = useMemo(() => modelQuoteRequest(generationConfig, routedModel, generationCapability, modelRequirements), [generationCapability, generationConfig, modelRequirements, routedModel]);
     const quoteRequestKey = JSON.stringify(quoteRequest || null);
-    const [quotedCredits, setQuotedCredits] = useState<number | null>(null);
-    const generationCredits = quotedCredits ?? configuredCredits;
+    const [routeQuote, setRouteQuote] = useState<LogicalModelQuote | null>(null);
+    const generationCredits = routeQuote ? routeQuote.amountMicrocredits / 1_000_000 : configuredCredits;
     const formattedGenerationCredits = generationCredits?.toLocaleString("zh-CN", { maximumFractionDigits: 6 });
     const modelSummary = routedModel ? modelDisplayName(effectiveConfig, routedModel) : "未选择模型";
     const durationSummary = `${Number(watchedDuration || Math.max(0.5, (selectedShot?.durationMs || 3000) / 1000))}s`;
@@ -220,15 +223,15 @@ export default function WorkflowProductionWorkbench(props: Props) {
 
     useEffect(() => {
         if (!creditsEnabled || !quoteRequest) {
-            setQuotedCredits(null);
+            setRouteQuote(null);
             return;
         }
         const controller = new AbortController();
-        setQuotedCredits(null);
-        quoteLogicalModel(quoteRequest.logicalModelID, quoteRequest.intent, controller.signal)
-            .then(({ quote }) => setQuotedCredits(quote.amountMicrocredits / 1_000_000))
+        setRouteQuote(null);
+        quoteModel(quoteRequest, controller.signal)
+            .then(({ quote }) => setRouteQuote(quote))
             .catch(() => {
-                if (!controller.signal.aborted) setQuotedCredits(null);
+                if (!controller.signal.aborted) setRouteQuote(null);
             });
         return () => controller.abort();
         // quoteRequestKey captures the normalized request without retriggering on object identity.
@@ -336,7 +339,6 @@ export default function WorkflowProductionWorkbench(props: Props) {
             if (!productionStep) throw new Error("当前生成阶段不可用，请刷新页面后重试");
             if (productionStep.status === "failed") throw new Error("当前生成阶段失败，请刷新后重试");
             if (!routedModel) throw new Error(activeStage === "video" ? "请先配置视频模型" : "请先配置图片模型");
-            if (routedModel.startsWith("local:dreamina-cli")) throw new Error("本机即梦任务暂不能登记到分镜产物，请选择后端模型渠道");
             const compatibilityError = modelCompatibilityError(effectiveConfig, routedModel, modelRequirements);
             if (compatibilityError) throw new Error(`当前模型配置不可用：${compatibilityError}`);
             const saved = await saveProjectShot(projectId, {
@@ -554,7 +556,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
                         </div>
                         <footer className="workflow-editor-actions">
                             <div className="workflow-generation-cost" aria-live="polite">
-                                {creditsEnabled && formattedGenerationCredits ? <><CreditSymbol /><span>本次预计 {formattedGenerationCredits} 积分</span></> : creditsEnabled && routedModel ? <span>本次费用将在提交时按实际规格计算</span> : null}
+                                {creditsEnabled && formattedGenerationCredits ? <><CreditSymbol /><span title={routeQuote ? modelQuoteDescription(routeQuote) : undefined}>本次{routeQuote?.estimated ? "预估" : "费用"} {formattedGenerationCredits} 积分</span></> : creditsEnabled && routedModel ? <span>本次费用将在提交时按实际规格计算</span> : null}
                             </div>
                             <div className="flex items-center gap-2"><Button danger icon={<Trash2 className="size-4" />} loading={deleteShot.isPending} disabled={saveShot.isPending || selectedShotSubmitting || changeAssetBinding.isPending} onClick={requestDeleteShot}>删除镜头</Button><Button htmlType="submit" icon={<Save className="size-4" />} loading={saveShot.isPending} disabled={!editorDirty || deleteShot.isPending}>保存脚本</Button><Button type="primary" icon={<Play className="size-4" />} loading={selectedShotSubmitting || shotTask?.status === "queued" || shotTask?.status === "running"} disabled={deleteShot.isPending} onClick={() => void generateArtifact()}>{selectedShotSubmitting ? `${stageCopy.action}（正在提交）` : shotTask?.status === "queued" || shotTask?.status === "running" ? `${stageCopy.action}（已运行${shotTaskElapsed}）` : shotTask?.status === "failed" ? `${stageCopy.action}（上次失败，可重试）` : shotTask?.status === "succeeded" && !newestArtifact ? `${stageCopy.action}（已完成，正在同步）` : newestArtifact ? `${stageCopy.action}（已生成）` : stageCopy.action}</Button></div>
                         </footer>
@@ -585,18 +587,17 @@ export default function WorkflowProductionWorkbench(props: Props) {
                 </aside>
             </div>
 
-            <Modal
+            <AppModal
+                flush
                 open={Boolean(imagePreviewArtifact?.resourceId)}
                 title={imagePreviewArtifact?.type === "action_board" ? "动作预演预览" : "分镜图预览"}
                 footer={null}
                 centered
-                destroyOnHidden
                 width="min(960px, calc(100vw - 32px))"
                 onCancel={() => setImagePreviewArtifact(null)}
-                styles={{ body: { padding: 0 } }}
             >
                 {imagePreviewArtifact?.resourceId ? <img className={`workflow-image-preview-modal ${imagePreviewArtifact.type === "action_board" ? "grayscale" : ""}`} src={resourceFileUrl(imagePreviewArtifact.resourceId)} alt={imagePreviewArtifact.type === "action_board" ? "动作预演大图" : "分镜图大图"} /> : null}
-            </Modal>
+            </AppModal>
 
             <ShotTimeline activeStage={activeStage} detail={detail} shots={shots} selectedShotId={selectedShot.id} submittingShotIds={submittingShotIds} onSelectShot={requestShotSelection} onAddShot={requestAddShot} addingShot={addingShot} />
         </div>
@@ -767,15 +768,10 @@ function revisionInput(values: ShotEditorValues): ShotRevisionInput {
 async function downloadArtifact(artifact: ShotArtifact, shotTitle: string, onError: (content: string) => void) {
     if (!artifact.resourceId) return;
     try {
-        const response = await fetch(resourceFileUrl(artifact.resourceId), { credentials: "include" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = `${shotTitle || "shot"}-v${artifact.version}.${artifact.type === "video" ? "mp4" : "png"}`;
-        anchor.click();
-        URL.revokeObjectURL(url);
+        await downloadBrowserMedia({
+            storageKey: resourceStorageKey(artifact.resourceId),
+            fileName: `${shotTitle || "shot"}-v${artifact.version}.${artifact.type === "video" ? "mp4" : "png"}`,
+        });
     } catch (error) {
         onError(error instanceof Error ? `下载失败：${error.message}` : "下载失败");
     }

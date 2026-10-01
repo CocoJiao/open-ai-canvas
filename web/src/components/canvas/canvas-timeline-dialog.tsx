@@ -1,4 +1,5 @@
-import { App, Button, Dropdown, Input, InputNumber, Modal, Progress } from "antd";
+import { App, Button, Dropdown, Input, InputNumber, Progress } from "antd";
+import { AppModal } from "@/components/ui/product/app-modal";
 import { Tooltip } from "@/components/ui/base/tooltip";
 // 二期：多轨时间线编辑弹窗。
 // 数据源是项目级 TimelineProject：视频/音频节点自动入轨，字幕条目转字幕片段。
@@ -12,7 +13,7 @@ import { saveAs } from "file-saver";
 import { CanvasTimelineRuler } from "./canvas-timeline-ruler";
 import { CanvasTimelinePreview } from "./canvas-timeline-preview";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { useThemeStore } from "@/stores/use-theme-store";
+import { useActiveTheme } from "@/stores/canvas/use-canvas-theme-store";
 import { buildTimelineFromNodes, isNodeInTimeline, syncTimelineSubtitleClips } from "@/lib/timeline/timeline-build";
 import { canPlaceAt, clampClipDurationByNeighbors, findNearestAvailablePlacement } from "@/lib/timeline/timeline-placement";
 import { computeSnap } from "@/lib/timeline/timeline-snap";
@@ -76,7 +77,7 @@ export function CanvasTimelineDialog({
     onCreateAssembledNode,
 }: CanvasTimelineDialogProps) {
     const { message } = App.useApp();
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const theme = canvasThemes[useActiveTheme()];
     const [draft, setDraft] = useState<TimelineProject>(() => buildTimelineFromNodes([]));
     const [playheadMs, setPlayheadMs] = useState(0);
     const [zoomLevel, setZoomLevel] = useState(1);
@@ -634,7 +635,7 @@ export function CanvasTimelineDialog({
     );
 
     return (
-        <Modal
+        <AppModal
             className="canvas-timeline-dialog"
             title={title}
             open={open}
@@ -646,7 +647,7 @@ export function CanvasTimelineDialog({
             afterOpenChange={(visible) => {
                 if (visible) ensureToolbarObserved();
             }}
-            styles={{ container: { padding: 0, overflow: "hidden" }, body: { padding: 0 } }}
+            flush
         >
             <div className="flex h-[min(76vh,760px)] min-h-[420px] flex-col text-sm" style={{ color: theme.node.text }}>
                 <div ref={toolbarRef} className="flex flex-nowrap items-center gap-2 overflow-hidden border-b px-4 py-3" style={{ borderColor: theme.toolbar.border, background: theme.toolbar.panel }}>
@@ -919,6 +920,6 @@ export function CanvasTimelineDialog({
                     <span className="ml-auto truncate text-xs opacity-45">拖拽片段移动，左右边缘裁剪，字幕片段来自视频节点的字幕数据</span>
                 </div>
             </div>
-        </Modal>
+        </AppModal>
     );
 }

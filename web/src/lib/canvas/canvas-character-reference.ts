@@ -18,6 +18,14 @@ export type CharacterBreakdown = {
     voiceTimbre: string;
 };
 
+export function normalizeCharacterImageMentions(prompt: string, imageCount: number, characterLabels: string[]) {
+    if (imageCount > 0 || !characterLabels.length) return prompt;
+    return prompt.replace(/@图片([1-9]\d*)(?=$|\s|[,.!?;:，。！？；：、)\]}】）])/g, (token, index: string) => {
+        const label = characterLabels[Number(index) - 1];
+        return label ? "@" + label : token;
+    });
+}
+
 export function refreshCanvasCharacterReferenceNodes(nodes: CanvasNodeData[], assets: ProjectAsset[]) {
     const characters = new Map(assets.filter((asset) => asset.category === "character" && asset.character).map((asset) => [asset.id, asset]));
     let changed = false;
@@ -132,7 +140,7 @@ function flattenCharacterCandidates(value: unknown): unknown[] | undefined {
     return undefined;
 }
 
-function extractCharacterBreakdownJson(raw: string) {
+export function extractCharacterBreakdownJson(raw: string, allowEmptyCharacters = false) {
     for (let start = 0; start < raw.length; start += 1) {
         if (raw[start] !== "{" && raw[start] !== "[") continue;
         const end = findJsonValueEnd(raw, start);
@@ -144,6 +152,9 @@ function extractCharacterBreakdownJson(raw: string) {
             // 模型的推理文字可能包含 aliases: [] 等合法 JSON 片段；角色契约只接受带 characters 字段的对象。
             const candidates = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? flattenCharacterCandidates((parsed as { characters?: unknown }).characters) : undefined;
             if (Array.isArray(candidates) && candidates.length) return parsed;
+            // 章节资产允许无人场景；仍交由章节解析器校验三个必填数组。
+            if (allowEmptyCharacters && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                && Array.isArray((parsed as { characters?: unknown }).characters)) return parsed;
         } catch {
             // Ignore unrelated braces in model prose and continue to the next complete JSON value.
         }

@@ -1,37 +1,37 @@
-import { Button, Modal, Tag } from "antd";
+import { ART_CRITIQUE_STAGE_PROGRESS, CritiqueOverlay, ArtCritiqueProgress, IssueDetailView, ReportSummary, OptionCard, FilterChip, IssueCard } from "./ai-art-critique-report";
+import { resolveImageUrl } from "@/services/image-storage";
+import { repairIssueTarget, layoutArtCritiqueLabels, ART_CRITIQUE_CATEGORY_COLORS } from "@/lib/art-critique/annotation";
+import { executeArtCritique } from "@/services/art-critique-execution";
+import { AppModal } from "@/components/ui/product/app-modal";
+import { Sparkles, X, Image as ImageIcon, FileText, CheckCircle2, LoaderCircle, RefreshCw } from "lucide-react";
+import { IconButton } from "@/components/ui/base/buttons";
 import { EmptyState } from "@/components/ui/product/empty-state";
-import { ArrowLeft, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Copy, FileText, Image as ImageIcon, LoaderCircle, RefreshCw, Sparkles, Target, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-
+import { CreativeQuoteCard } from "@/components/creation/creative-agent-cards";
+import { Callout } from "@/components/ui/product/callout";
+import { Button } from "antd";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { useMemo, useRef, useState, useEffect } from "react";
+
 import {
-    ART_CRITIQUE_SCHEMA_VERSION,
     ART_CRITIQUE_PLUGIN_ID,
-    artCritiqueCategoryLabel,
-    artCritiqueSeverityLabel,
-    artCritiqueStageLabel,
     artCritiqueSourceFingerprint,
     createDefaultArtCritiqueState,
     isArtCritiqueImageInput,
     type ArtCritiqueCategory,
-    type ArtCritiqueIssue,
     type ArtCritiqueNodeState,
-    type ArtCritiqueOption,
-    type ArtCritiquePipelineStage,
-    type ArtCritiqueReport,
-} from "@/lib/art-critique/contracts";
-import { ART_CRITIQUE_CATEGORY_COLORS, ART_CRITIQUE_SEVERITY_COLORS, layoutArtCritiqueLabels, repairIssueTarget, targetBounds } from "@/lib/art-critique/annotation";
-import { runArtCritiquePipeline } from "@/lib/art-critique/pipeline";
-import { useCopyText } from "@/hooks/use-copy-text";
-import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
+    type ArtCritiquePipelineStage, ART_CRITIQUE_SCHEMA_VERSION, type ArtCritiqueReport, artCritiqueStageLabel, artCritiqueCategoryLabel } from "@/lib/art-critique/contracts";
+import { ApprovedToolExecution, type ApprovedToolExecutionState } from "@/services/approved-tool-execution";
+import { getActiveUserScope } from "@/lib/user-scope";
 import { modelOptionLabel, useEffectiveConfig } from "@/stores/use-config-store";
 import { usePluginStore } from "@/stores/use-plugin-store";
-import { useThemeStore } from "@/stores/use-theme-store";
+import { useActiveTheme } from "@/stores/canvas/use-canvas-theme-store";
 import type { CanvasNodeData } from "@/types/canvas";
-import { IconButton } from "@/components/ui/base/buttons";
-import { Callout } from "@/components/ui/product/callout";
+export { ART_CRITIQUE_STAGE_PROGRESS } from "./ai-art-critique-report";
 
 type AiArtCritiqueModalProps = {
+    startRequestId?: string;
+    restartRequested?: boolean;
+    onRunningChange?: (running: boolean) => void;
     node: CanvasNodeData | null;
     upstreamNodes: CanvasNodeData[];
     open: boolean;
@@ -40,31 +40,18 @@ type AiArtCritiqueModalProps = {
 };
 
 const CATEGORIES: ArtCritiqueCategory[] = ["composition", "color", "lighting", "proportion", "other"];
-const ART_CRITIQUE_STAGE_PROGRESS: Record<ArtCritiquePipelineStage, number> = {
-    preparing: 8,
-    scene: 22,
-    reviewing: 52,
-    aggregating: 66,
-    grounding: 78,
-    verifying: 90,
-    annotating: 97,
-    completed: 100,
-    failed: 100,
-};
-type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
+export type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 type AiArtCritiqueView = "overview" | "detail";
-type ArtCritiquePromptStatus = "ready" | "pending" | "unavailable";
+export type ArtCritiquePromptStatus = "ready" | "pending" | "unavailable";
 
-export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdateState }: AiArtCritiqueModalProps) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdateState, startRequestId, restartRequested, onRunningChange }: AiArtCritiqueModalProps) {
+    const theme = canvasThemes[useActiveTheme()];
     const effectiveConfig = useEffectiveConfig();
     const selectedCritiqueModel = effectiveConfig.textModel.trim();
     const configuredCritiqueModelLabel = selectedCritiqueModel ? modelOptionLabel(effectiveConfig, selectedCritiqueModel) : "未配置文本/视觉理解模型";
-    const installations = usePluginStore((state) => state.installations);
-    const input = useMemo(() => upstreamNodes.find(isArtCritiqueImageInput), [upstreamNodes]);
+    const enabled = usePluginStore((state) => state.pluginStates[ART_CRITIQUE_PLUGIN_ID]?.effectiveEnabled ?? (ART_CRITIQUE_PLUGIN_ID in state.runtimeStatuses ? state.runtimeStatuses[ART_CRITIQUE_PLUGIN_ID] === "enabled" : Boolean(state.installations.find((item) => item.manifest.id === ART_CRITIQUE_PLUGIN_ID)?.enabled)));
+    const input = useMemo(() => { const images = upstreamNodes.filter(isArtCritiqueImageInput); return images.length === 1 ? images[0] : undefined; }, [upstreamNodes]);
     const state = node?.metadata?.artCritique || createDefaultArtCritiqueState();
-    const installation = installations.find((item) => item.manifest.id === ART_CRITIQUE_PLUGIN_ID);
-    const enabled = installation?.enabled === true;
     const currentFingerprint = input ? artCritiqueSourceFingerprint(input) : "";
     const stale = Boolean(state.report && currentFingerprint && state.report.sourceFingerprint !== currentFingerprint);
     const visibleState: ArtCritiqueNodeState = stale && state.status !== "running" ? { ...state, status: "stale" } : state;
@@ -78,7 +65,11 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
     const [hoveredIssueId, setHoveredIssueId] = useState<string | null>(null);
     const [draftReportVisible, setDraftReportVisible] = useState(false);
     const abortRef = useRef<AbortController | null>(null);
-    const preparedImageRef = useRef<{ fingerprint: string; dataUrl: string } | null>(null);
+    const approvalRef = useRef<ApprovedToolExecution | null>(null);
+    const [payment, setPayment] = useState<ApprovedToolExecutionState>({ busy: false });
+    const startedRequestRef = useRef<string | undefined>(undefined);
+    const currentRunTargetRef = useRef("");
+    currentRunTargetRef.current = `${getActiveUserScope()}:${node?.id || ""}:${currentFingerprint}`;
 
     useEffect(() => {
         if (!open || !input) {
@@ -110,6 +101,8 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
     }, [node?.id, currentFingerprint, open]);
 
     useEffect(() => () => abortRef.current?.abort(), []);
+    useEffect(() => () => abortRef.current?.abort(), [node?.id, currentFingerprint]);
+    useEffect(() => { if (!enabled) abortRef.current?.abort(); }, [enabled]);
 
     const issues = visibleState.report?.issues || [];
     const reportOptions = visibleState.report?.options || [];
@@ -143,13 +136,18 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
         setView("overview");
     };
 
-    const runReview = async () => {
+    const runReview = async (resume = false) => {
+        if (abortRef.current) return;
         if (!node || !input) {
-            setLocalError("请先连接一张已有图片");
+            setLocalError("请连接且仅连接一张已有图片");
             return;
         }
         if (!enabled) {
             setLocalError("插件尚未启用，请先到插件管理中开启 AI 审美批改");
+            return;
+        }
+        if (resume && (!state.billingRunId || state.sourceFingerprint !== artCritiqueSourceFingerprint(input) || state.lastRunModel !== selectedCritiqueModel)) {
+            setLocalError("原分析的图片或模型已变化，请开始新的分析");
             return;
         }
         setView("overview");
@@ -157,9 +155,16 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
         setHoveredIssueId(null);
         setDraftReportVisible(false);
         const sourceFingerprint = artCritiqueSourceFingerprint(input);
-        const runId = `art-critique-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const runId = resume && state.lastRunId ? state.lastRunId : `art-critique-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        let billingRunId = resume ? state.billingRunId : undefined;
         const controller = new AbortController();
         abortRef.current = controller;
+        onRunningChange?.(true);
+        const runTarget = currentRunTargetRef.current;
+        const runScope = getActiveUserScope();
+        const publishState = (next: ArtCritiqueNodeState) => {
+            if (getActiveUserScope() === runScope && currentRunTargetRef.current === runTarget && abortRef.current === controller) onUpdateState(node.id, { ...next, billingRunId, lastRunModel: selectedCritiqueModel });
+        };
         const baseState: ArtCritiqueNodeState = {
             ...state,
             schemaVersion: ART_CRITIQUE_SCHEMA_VERSION,
@@ -168,41 +173,41 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             sourceNodeId: input.id,
             sourceFingerprint,
             lastRunId: runId,
+            stageTaskIds: resume ? state.stageTaskIds : {},
             errorCode: undefined,
             errorMessage: undefined,
             updatedAt: new Date().toISOString(),
         };
-        onUpdateState(node.id, baseState);
+        publishState(baseState);
         setRunning(true);
         setActiveStage("preparing");
         setLocalError("");
         let latestStage: ArtCritiquePipelineStage = "preparing";
         let runningReport: ArtCritiqueReport | undefined = state.report;
+        const stageTaskIds: Record<string, string> = resume ? { ...state.stageTaskIds } : {};
+        setPayment({ busy: false });
+        const approval = new ApprovedToolExecution({
+            clientKey: `art-critique:${runId}`, runId: billingRunId,
+            identity: { kind: "art-critique", nodeId: node.id, sourceFingerprint, model: selectedCritiqueModel }, signal: controller.signal,
+            onRun: (id) => { billingRunId = id; publishState({ ...baseState, stageTaskIds: { ...stageTaskIds } }); },
+            onState: (next) => { if (currentRunTargetRef.current === runTarget) setPayment(next); },
+        });
+        approvalRef.current = approval;
         try {
-            const source = input.metadata?.content || input.metadata?.previewContent || "";
-            const cachedImage = preparedImageRef.current;
-            const dataUrl =
-                cachedImage?.fingerprint === sourceFingerprint
-                    ? cachedImage.dataUrl
-                    : await imageToDataUrl({
-                          dataUrl: source.startsWith("data:") ? source : undefined,
-                          url: source.startsWith("data:") ? undefined : source,
-                          storageKey: input.metadata?.storageKey,
-                          name: input.title,
-                          mimeType: input.metadata?.mimeType,
-                      });
-            if (!dataUrl) throw new Error("无法读取输入图片");
-            if (!controller.signal.aborted) preparedImageRef.current = { fingerprint: sourceFingerprint, dataUrl };
-            const report = await runArtCritiquePipeline(
-                effectiveConfig,
-                { dataUrl, title: input.title, sourceFingerprint },
-                {
+            const report = await executeArtCritique({
+                    nodeId: node.id, runId, source: input, config: effectiveConfig,
                     signal: controller.signal,
+                    submitStage: approval.execute,
+                    onTaskCreated: (stage, taskId) => {
+                        stageTaskIds[stage] = taskId;
+                        publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, analysisStage: latestStage, updatedAt: new Date().toISOString() });
+                    },
                     onStage: (analysisStage) => {
                         latestStage = analysisStage;
                         setActiveStage(analysisStage);
-                        onUpdateState(node.id, {
+                        publishState({
                             ...baseState,
+                            stageTaskIds: { ...stageTaskIds },
                             ...(runningReport ? { report: { ...runningReport, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) } } : {}),
                             analysisStage,
                             updatedAt: new Date().toISOString(),
@@ -212,19 +217,20 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
                         if (controller.signal.aborted || abortRef.current !== controller) return;
                         runningReport = draftReport;
                         setDraftReportVisible(true);
-                        onUpdateState(node.id, {
+                        publishState({
                             ...baseState,
+                            stageTaskIds: { ...stageTaskIds },
                             status: "running",
                             analysisStage: latestStage,
                             report: { ...draftReport, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) },
                             updatedAt: new Date().toISOString(),
                         });
                     },
-                },
-            );
+            });
             setDraftReportVisible(false);
-            onUpdateState(node.id, {
+            publishState({
                 ...baseState,
+                stageTaskIds: { ...stageTaskIds },
                 status: "completed",
                 analysisStage: "completed",
                 report: { ...report, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) },
@@ -235,28 +241,37 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             if (controller.signal.aborted) {
                 setActiveStage(undefined);
                 setDraftReportVisible(false);
-                onUpdateState(node.id, { ...baseState, status: "idle", analysisStage: undefined, errorCode: undefined, errorMessage: undefined, updatedAt: new Date().toISOString() });
+                publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, status: "failed", analysisStage: "failed", errorCode: "analysis_interrupted", errorMessage: "分析观察已停止；已提交阶段保留在任务中心，不会自动重复提交。", updatedAt: new Date().toISOString() });
                 return;
             }
             const errorMessage = error instanceof Error ? error.message : "AI 批改失败，请稍后重试";
             setActiveStage("failed");
             setDraftReportVisible(false);
             setLocalError(errorMessage);
-            onUpdateState(node.id, { ...baseState, status: "failed", analysisStage: "failed", errorCode: error instanceof Error ? error.message : "art_critique_failed", errorMessage, updatedAt: new Date().toISOString() });
+            publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, status: "failed", analysisStage: "failed", errorCode: error instanceof Error ? error.message : "art_critique_failed", errorMessage, updatedAt: new Date().toISOString() });
         } finally {
+            approval.dispose();
+            if (approvalRef.current === approval) { approvalRef.current = null; setPayment({ busy: false }); }
             if (abortRef.current === controller) abortRef.current = null;
             setRunning(false);
+            onRunningChange?.(false);
         }
     };
 
     const progressStage = activeStage || visibleState.analysisStage || "preparing";
     const displayedModelLabel = visibleState.report?.modelLabel || configuredCritiqueModelLabel;
+    useEffect(() => {
+        if (!open || !node || !startRequestId || running || startedRequestRef.current === startRequestId) return;
+        startedRequestRef.current = startRequestId;
+        void runReview(Boolean(!restartRequested && state.billingRunId && state.status !== "completed" && state.sourceFingerprint === currentFingerprint && state.lastRunModel === selectedCritiqueModel));
+    }, [open, node?.id, startRequestId, running]);
+
     const modelStatusLabel = running ? "正在使用" : visibleState.report?.modelLabel ? "报告使用" : selectedCritiqueModel ? "待使用" : "需要配置";
     const modelStatusColor = selectedCritiqueModel || visibleState.report?.modelLabel ? theme.node.muted : "var(--status-warning)";
     const modelInlineLabel = selectedCritiqueModel || visibleState.report?.modelLabel ? `${modelStatusLabel} · ${displayedModelLabel}` : "请到设置中选择支持图片理解的文本模型";
 
     return (
-        <Modal
+        <AppModal
             open={open}
             title={null}
             closable={false}
@@ -266,7 +281,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             onCancel={close}
             footer={null}
             className="art-critique-modal"
-            styles={{ container: { padding: 0, overflow: "hidden" }, body: { padding: 0 } }}
+            flush
         >
             <div className="flex h-[min(820px,calc(100dvh-32px))] max-h-[calc(100dvh-32px)] min-h-0 flex-col overflow-hidden rounded-[var(--r-lg)]" style={{ background: theme.canvas.background, color: theme.node.text }}>
                 <header className="flex shrink-0 items-center gap-3 border-b px-5 py-3.5" style={{ borderColor: theme.node.edge }}>
@@ -335,6 +350,8 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
 
                     <aside className="min-h-0 flex-1 overflow-y-auto" data-canvas-wheel-scroll>
                         <div className="flex min-h-full flex-col gap-4 p-4">
+                            {payment.quote ? <CreativeQuoteCard quote={payment.quote} busy={payment.busy} onApprove={() => void approvalRef.current?.approve(payment.quote!.items.map((item) => item.id))} onRefresh={() => void approvalRef.current?.refresh()} /> : null}
+                            {payment.error ? <Callout tone="warning" title="费用确认未完成">{payment.error}</Callout> : null}
                             {running || visibleState.status === "running" ? <ArtCritiqueProgress stage={progressStage} theme={theme} /> : null}
                             {draftReportVisible && visibleState.status === "running" && visibleState.report ? (
                                 <Callout tone="info" title="报告初稿已生成">
@@ -448,6 +465,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
                                             取消分析
                                         </Button>
                                     ) : null}
+                                    {!running && state.billingRunId && state.status !== "completed" && !stale && state.lastRunModel === selectedCritiqueModel ? <Button size="small" disabled={!input || !enabled} onClick={() => void runReview(true)}>继续上次分析</Button> : null}
                                     <Button
                                         type="primary"
                                         size="small"
@@ -465,419 +483,6 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
                     </aside>
                 </div>
             </div>
-        </Modal>
-    );
-}
-
-function ArtCritiqueProgress({ stage, theme }: { stage: ArtCritiquePipelineStage; theme: CanvasTheme }) {
-    const percent = ART_CRITIQUE_STAGE_PROGRESS[stage];
-    const detail = stage === "reviewing" ? "场景路由与多个 Reviewer 正在并行检查画面" : stage === "verifying" ? "正在并行复核问题并生成 AI 修改提示词" : "正在按阶段生成批改报告";
-    return (
-        <section className="flex flex-col gap-2 rounded-[var(--r-lg)] border px-3 py-3" style={{ borderColor: theme.node.edge, background: theme.node.panel }} aria-label="AI 审美批改进度">
-            <div className="flex items-center justify-between gap-3 text-xs">
-                <span className="flex min-w-0 items-center gap-2 font-semibold">
-                    <LoaderCircle className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
-                    <span className="truncate">{artCritiqueStageLabel(stage)}</span>
-                </span>
-                <span className="shrink-0 tabular-nums" style={{ color: theme.node.muted }}>
-                    {percent}%
-                </span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full" style={{ background: "color-mix(in oklch, var(--workspace-accent) 14%, transparent)" }}>
-                <div
-                    className="h-full rounded-full transition-[width] duration-500 motion-reduce:transition-none"
-                    role="progressbar"
-                    aria-label="AI 审美批改阶段进度"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={percent}
-                    aria-valuetext={`${artCritiqueStageLabel(stage)}，约 ${percent}%`}
-                    style={{ width: `${percent}%`, background: theme.accent.primary }}
-                />
-            </div>
-            <div className="text-[var(--fs-micro)]" style={{ color: theme.node.muted }}>
-                {detail}
-            </div>
-        </section>
-    );
-}
-
-function ReportSummary({ report, theme, isDraft }: { report: NonNullable<ArtCritiqueNodeState["report"]>; theme: CanvasTheme; isDraft?: boolean }) {
-    const summary = report.summary || "这张图暂时没有整体总结。";
-    const hasLongSummary = summary.length > 120;
-    return (
-        <section className="flex flex-col gap-2 border-b pb-4" style={{ borderColor: theme.node.edge }}>
-            <div className="flex items-center gap-2 text-sm font-semibold">
-                {isDraft ? (
-                    <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" style={{ color: "var(--workspace-accent)" }} aria-hidden="true" />
-                ) : (
-                    <CheckCircle2 className="size-4" style={{ color: "var(--status-success)" }} aria-hidden="true" />
-                )}
-                <span>{isDraft ? "整体判断（初稿）" : "整体判断"}</span>
-                {report.rubricVersion ? (
-                    <span className="ml-auto text-[11px] font-normal" style={{ color: theme.node.muted }}>
-                        标准 {report.rubricVersion}
-                    </span>
-                ) : null}
-            </div>
-            <p className={`m-0 text-sm leading-6${hasLongSummary ? " line-clamp-3" : ""}`}>{summary}</p>
-            {hasLongSummary ? (
-                <details className="group">
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium outline-none focus-visible:underline [&::-webkit-details-marker]:hidden" style={{ color: "var(--workspace-accent)" }}>
-                        查看完整判断
-                        <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" />
-                    </summary>
-                    <p className="mt-2 mb-0 text-xs leading-5" style={{ color: theme.node.muted }}>
-                        {summary}
-                    </p>
-                </details>
-            ) : null}
-            {report.pipelineWarnings?.length ? (
-                <details className="group rounded-[var(--r-md)] px-2.5 py-2 text-xs" style={{ background: "color-mix(in oklch, var(--status-warning) 8%, transparent)", color: "var(--status-warning)" }}>
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium outline-none focus-visible:underline [&::-webkit-details-marker]:hidden">
-                        本次分析有部分步骤降级
-                        <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" />
-                    </summary>
-                    <ul className="mt-2 mb-0 list-disc space-y-1 pl-5 leading-5">
-                        {report.pipelineWarnings.map((warning) => (
-                            <li key={warning}>{warning}</li>
-                        ))}
-                    </ul>
-                </details>
-            ) : null}
-            {report.strengths.length ? (
-                <details className="group">
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold outline-none focus-visible:underline [&::-webkit-details-marker]:hidden" style={{ color: theme.node.muted }}>
-                        画面已有的优点
-                        <span className="inline-flex items-center gap-1 font-medium">
-                            {report.strengths.length} 项
-                            <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" />
-                        </span>
-                    </summary>
-                    <ul className="mt-2 mb-0 list-disc space-y-1 pl-5 text-xs leading-5">
-                        {report.strengths.slice(0, 3).map((item) => (
-                            <li key={item}>{item}</li>
-                        ))}
-                    </ul>
-                    {report.strengths.length > 3 ? (
-                        <div className="mt-1 text-xs" style={{ color: theme.node.muted }}>
-                            还有 {report.strengths.length - 3} 项优点
-                        </div>
-                    ) : null}
-                </details>
-            ) : null}
-        </section>
-    );
-}
-
-function IssueCard({ issue, index, selected, theme, onClick, onHover }: { issue: ArtCritiqueIssue; index: number; selected: boolean; theme: CanvasTheme; onClick: () => void; onHover: (issueId: string | null) => void }) {
-    const color = ART_CRITIQUE_SEVERITY_COLORS[issue.severity];
-    return (
-        <button
-            type="button"
-            className="group flex w-full items-start gap-3 border-b px-3.5 py-3.5 text-left outline-none transition last:border-b-0 hover:bg-black/[.03] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] dark:hover:bg-white/[.04]"
-            style={{ borderColor: theme.node.edge, background: selected ? `color-mix(in oklch, ${color} 8%, ${theme.node.panel})` : "transparent", outlineColor: color }}
-            onClick={onClick}
-            onMouseEnter={() => onHover(issue.id)}
-            onMouseLeave={() => onHover(null)}
-            onFocus={() => onHover(issue.id)}
-            onBlur={() => onHover(null)}
-        >
-            <span className="grid size-7 shrink-0 place-items-center rounded-[var(--r-sm)] text-xs font-bold" style={{ background: color, color: "#fff" }}>
-                {index}
-            </span>
-            <span className="min-w-0 flex-1">
-                <span className="block line-clamp-2 text-sm font-semibold leading-5">{issue.title}</span>
-                <span className="mt-1.5 flex min-w-0 items-center gap-2 text-xs" style={{ color: theme.node.muted }}>
-                    <span style={{ color: ART_CRITIQUE_CATEGORY_COLORS[issue.category] }}>{artCritiqueCategoryLabel(issue.category)}</span>
-                    <span className="size-1 shrink-0 rounded-full bg-current opacity-40" aria-hidden="true" />
-                    <span style={{ color }}>{artCritiqueSeverityLabel(issue.severity)}</span>
-                    {issue.verification && issue.verification.verdict !== "confirmed" ? (
-                        <>
-                            <span className="size-1 shrink-0 rounded-full bg-current opacity-40" aria-hidden="true" />
-                            <span>待复核</span>
-                        </>
-                    ) : null}
-                    <span className="ml-auto shrink-0 tabular-nums">{Math.round(issue.confidence * 100)}%</span>
-                </span>
-            </span>
-            <ChevronRight className="mt-1 size-4 shrink-0 opacity-35 transition-transform group-hover:translate-x-0.5 group-hover:opacity-70" aria-hidden="true" />
-        </button>
-    );
-}
-
-function IssueDetailView({
-    issue,
-    issueIndex,
-    total,
-    isDraft,
-    promptStatus,
-    theme,
-    onBack,
-    onPrevious,
-    onNext,
-}: {
-    issue: ArtCritiqueIssue;
-    issueIndex: number;
-    total: number;
-    isDraft?: boolean;
-    promptStatus: ArtCritiquePromptStatus;
-    theme: CanvasTheme;
-    onBack: () => void;
-    onPrevious: () => void;
-    onNext: () => void;
-}) {
-    const targetSourceLabel = isDraft ? "定位中" : issue.targetSource === "reference" ? "参考区域" : issue.targetSource === "model" ? "模型定位" : issue.target.type === "global" ? "全局范围" : "局部区域";
-    const severityColor = ART_CRITIQUE_SEVERITY_COLORS[issue.severity];
-    const copyText = useCopyText();
-    return (
-        <div className="flex flex-col gap-4">
-            <div className="flex items-center justify-between gap-3">
-                <Button type="text" size="small" icon={<ArrowLeft className="size-4" />} onClick={onBack}>
-                    问题列表
-                </Button>
-                <span className="text-xs tabular-nums" style={{ color: theme.node.muted }}>
-                    问题 {issueIndex + 1} / {total}
-                </span>
-            </div>
-
-            <section className="flex flex-col gap-3 border-b pb-5" style={{ borderColor: theme.node.edge }}>
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                    <span className="size-2 rounded-full" style={{ background: severityColor }} aria-hidden="true" />
-                    <span>具体问题</span>
-                    <Tag bordered={false} className="ml-auto text-[11px]" style={{ color: severityColor }}>
-                        {artCritiqueSeverityLabel(issue.severity)}
-                    </Tag>
-                </div>
-                <h3 className="m-0 text-lg font-semibold leading-7">{issue.title}</h3>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs" style={{ color: theme.node.muted }}>
-                    <span style={{ color: ART_CRITIQUE_CATEGORY_COLORS[issue.category] }}>{artCritiqueCategoryLabel(issue.category)}</span>
-                    <span className="size-1 rounded-full bg-current opacity-40" aria-hidden="true" />
-                    <span>{Math.round(issue.confidence * 100)}% 把握</span>
-                    {issue.verification && issue.verification.verdict !== "confirmed" ? (
-                        <span className="rounded-full px-1.5 py-0.5" style={{ background: "color-mix(in oklch, var(--status-warning) 12%, transparent)", color: "var(--status-warning)" }}>
-                            待复核
-                        </span>
-                    ) : null}
-                </div>
-                <div className="rounded-[var(--r-md)] px-3 py-3" style={{ background: theme.node.panel }}>
-                    <div className="mb-1 text-xs font-semibold" style={{ color: theme.node.muted }}>
-                        AI 判断
-                    </div>
-                    <p className="m-0 text-sm leading-6">{issue.explanation}</p>
-                </div>
-                {issue.targetDescription ? (
-                    <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
-                        <span className="font-semibold">定位参考：</span>
-                        {issue.targetDescription}
-                        <span className="ml-1 rounded-full px-1.5 py-0.5" style={{ background: "color-mix(in oklch, var(--workspace-accent) 8%, transparent)" }}>
-                            {targetSourceLabel}
-                        </span>
-                    </div>
-                ) : null}
-            </section>
-
-            <section className="flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-sm font-semibold">
-                        <Target className="size-4" style={{ color: ART_CRITIQUE_CATEGORY_COLORS[issue.category] }} aria-hidden="true" />
-                        <span>改进</span>
-                    </div>
-                    {promptStatus === "ready" ? (
-                        <Button type="default" size="small" className="shrink-0" icon={<Copy className="size-3.5" />} aria-label="复制 AI 生成的修改提示词" onClick={() => copyText(issue.editPrompt || "", "AI 修改提示词已复制")}>
-                            复制提示词
-                        </Button>
-                    ) : (
-                        <Button type="default" size="small" className="shrink-0" disabled icon={promptStatus === "pending" ? <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Copy className="size-3.5" />}>
-                            {promptStatus === "pending" ? "AI 生成中" : "提示词未生成"}
-                        </Button>
-                    )}
-                </div>
-                {promptStatus === "pending" ? (
-                    <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
-                        定位完成后，AI 会结合问题区域生成可直接用于局部编辑的提示词。
-                    </div>
-                ) : null}
-                {promptStatus === "unavailable" ? (
-                    <div className="text-xs leading-5" style={{ color: "var(--status-warning)" }}>
-                        AI 修改提示词未生成，请重新批改后重试。
-                    </div>
-                ) : null}
-                <div className="text-sm leading-6">
-                    <span className="font-semibold">目标：</span>
-                    {issue.suggestion.goal}
-                </div>
-                {issue.suggestion.actions.length ? (
-                    <div>
-                        <div className="mb-1.5 text-xs font-semibold" style={{ color: theme.node.muted }}>
-                            建议动作
-                        </div>
-                        <ol className="m-0 flex list-none flex-col gap-2 p-0 text-sm leading-6">
-                            {issue.suggestion.actions.map((item, index) => (
-                                <li key={item} className="flex items-start gap-2">
-                                    <span
-                                        className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full text-[var(--fs-micro)] font-bold"
-                                        style={{ background: "color-mix(in oklch, var(--workspace-accent) 10%, transparent)", color: "var(--workspace-accent)" }}
-                                    >
-                                        {index + 1}
-                                    </span>
-                                    <span>{item}</span>
-                                </li>
-                            ))}
-                        </ol>
-                    </div>
-                ) : null}
-                {issue.suggestion.preserve.length ? (
-                    <div className="rounded-[var(--r-md)] px-3 py-2.5" style={{ background: "color-mix(in oklch, var(--status-success) 6%, transparent)" }}>
-                        <div className="mb-1 text-xs font-semibold" style={{ color: "var(--status-success)" }}>
-                            需要保留
-                        </div>
-                        <ul className="m-0 list-disc space-y-1 pl-4 text-xs leading-5">
-                            {issue.suggestion.preserve.map((item) => (
-                                <li key={item}>{item}</li>
-                            ))}
-                        </ul>
-                    </div>
-                ) : null}
-                <div className="rounded-[var(--r-md)] border px-3 py-2.5 text-xs leading-5" style={{ borderColor: theme.node.edge, background: theme.node.panel }}>
-                    <span className="font-semibold">预期效果：</span>
-                    {issue.suggestion.expectedEffect}
-                </div>
-            </section>
-
-            <div className="flex items-center justify-between border-t pt-3" style={{ borderColor: theme.node.edge }}>
-                <Button type="text" size="small" icon={<ArrowLeft className="size-4" />} disabled={issueIndex <= 0} onClick={onPrevious}>
-                    上一项
-                </Button>
-                <Button type="text" size="small" icon={<ArrowRight className="size-4" />} disabled={issueIndex < 0 || issueIndex >= total - 1} onClick={onNext}>
-                    下一项
-                </Button>
-            </div>
-        </div>
-    );
-}
-
-function OptionCard({ option, theme }: { option: ArtCritiqueOption; theme: CanvasTheme }) {
-    return (
-        <article className="rounded-[var(--r-lg)] border px-3 py-3" style={{ borderColor: theme.node.edge, background: theme.node.fill }}>
-            <div className="flex items-center gap-2 text-sm font-semibold">
-                <Sparkles className="size-4" style={{ color: ART_CRITIQUE_CATEGORY_COLORS[option.category] }} aria-hidden="true" />
-                <span className="min-w-0 flex-1">{option.title}</span>
-                <span className="shrink-0 text-[11px] font-normal" style={{ color: theme.node.muted }}>
-                    {Math.round(option.confidence * 100)}% 参考把握
-                </span>
-            </div>
-            <p className="mt-2 mb-0 text-xs leading-5" style={{ color: theme.node.muted }}>
-                {option.explanation}
-            </p>
-            {option.suggestion.actions.length ? (
-                <ul className="mt-2 mb-0 list-disc space-y-1 pl-5 text-xs leading-5">
-                    {option.suggestion.actions.slice(0, 3).map((action) => (
-                        <li key={action}>{action}</li>
-                    ))}
-                </ul>
-            ) : null}
-        </article>
-    );
-}
-
-function FilterChip({ label, active, color, onClick }: { label: string; active: boolean; color?: string; onClick: () => void }) {
-    return (
-        <button
-            type="button"
-            className="rounded-full border px-2.5 py-1 text-xs font-medium outline-none transition-[background-color,border-color,box-shadow,color] hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-            style={{
-                borderColor: active ? color || "var(--workspace-accent)" : "var(--border-subtle)",
-                background: active ? `color-mix(in oklch, ${color || "var(--workspace-accent)"} 12%, transparent)` : "transparent",
-                color: active ? color || "var(--workspace-accent)" : "var(--foreground-muted)",
-                outlineColor: color || "var(--workspace-accent)",
-            }}
-            aria-pressed={active}
-            onClick={onClick}
-        >
-            {label}
-        </button>
-    );
-}
-
-function CritiqueOverlay({
-    issues,
-    issueNumberById,
-    selectedIssueId,
-    labelPlacements,
-    onSelect,
-}: {
-    issues: ArtCritiqueIssue[];
-    issueNumberById: ReadonlyMap<string, number>;
-    selectedIssueId: string | null;
-    labelPlacements: Array<{ x: number; y: number }>;
-    onSelect: (id: string) => void;
-}) {
-    return (
-        <svg className="pointer-events-none absolute inset-3 size-[calc(100%-1.5rem)]" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" role="img" aria-label="AI 批改标注">
-            <title>AI 批改标注</title>
-            {issues.map((issue, index) => {
-                const renderIssue = repairIssueTarget(issue);
-                const issueNumber = issueNumberById.get(renderIssue.id) || index + 1;
-                const color = ART_CRITIQUE_SEVERITY_COLORS[renderIssue.severity];
-                const selected = renderIssue.id === selectedIssueId;
-                const dimmed = Boolean(selectedIssueId) && !selected;
-                const approximate = renderIssue.target.type !== "box";
-                const uncertain = renderIssue.targetSource === "reference" || renderIssue.verification?.verdict === "uncertain";
-                const label = labelPlacements[index] || { x: 0.04, y: 0.06 };
-                const bounds = targetBounds(renderIssue.target);
-                const labelX = label.x * 100;
-                const labelY = label.y * 100;
-                return (
-                    <g
-                        key={renderIssue.id}
-                        className="pointer-events-auto cursor-pointer outline-none"
-                        opacity={dimmed ? 0.28 : 1}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`${issueNumber}：${renderIssue.title}`}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={() => onSelect(renderIssue.id)}
-                        onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                onSelect(renderIssue.id);
-                            }
-                        }}
-                    >
-                        <rect
-                            x={bounds.x * 100}
-                            y={bounds.y * 100}
-                            width={bounds.width * 100}
-                            height={bounds.height * 100}
-                            rx="1.4"
-                            fill={color}
-                            fillOpacity={selected ? ".08" : ".015"}
-                            stroke={color}
-                            strokeWidth={selected ? 0.95 : 0.42}
-                            strokeDasharray={renderIssue.target.type === "global" || approximate || uncertain ? "2.2 1.6" : undefined}
-                            vectorEffect="non-scaling-stroke"
-                        />
-                        <rect
-                            x={labelX - 3.2}
-                            y={labelY - 2.55}
-                            width="6.4"
-                            height="5.1"
-                            rx="1.7"
-                            fill={color}
-                            fillOpacity={selected ? ".96" : ".7"}
-                            stroke="#fff"
-                            strokeOpacity={selected ? ".9" : ".62"}
-                            strokeWidth=".55"
-                            vectorEffect="non-scaling-stroke"
-                        />
-                        <text x={labelX} y={labelY + 1.05} textAnchor="middle" fill="#fff" fontSize="3.05" fontWeight="700">
-                            {issueNumber}
-                        </text>
-                        <title>{`${issueNumber}：${renderIssue.title}`}</title>
-                    </g>
-                );
-            })}
-        </svg>
+        </AppModal>
     );
 }

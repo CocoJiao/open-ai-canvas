@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 
 	"infinite-canvas/backend/internal/database"
 	"infinite-canvas/backend/internal/handler"
+	"infinite-canvas/backend/internal/logging"
 	"infinite-canvas/backend/internal/repository"
 	"infinite-canvas/backend/internal/service"
 	"infinite-canvas/backend/internal/updaterclient"
@@ -25,6 +27,11 @@ import (
 )
 
 func main() {
+	logConfig, err := logging.ConfigFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	logging.Setup(logConfig)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil {
@@ -68,8 +75,7 @@ func run(ctx context.Context) error {
 
 	repo := repository.New(db)
 	addr := env("CANVAS_BACKEND_ADDR", ":8080")
-	capabilities := service.RuntimeCapabilitiesForDeployment(addr, os.Getenv("CANVAS_DESKTOP_LOCAL_CHANNELS_ENABLED"))
-	svc := service.NewWithRuntimeCapabilities(repo, dataDir, capabilities)
+	svc := service.New(repo, dataDir)
 	if updaterToken := strings.TrimSpace(os.Getenv("CANVAS_UPDATER_TOKEN")); updaterToken != "" {
 		svc.ConfigureUpdateManager(updaterclient.New(env("CANVAS_UPDATER_SOCKET", "/run/open-ai-canvas-updater/updater.sock"), updaterToken))
 	}
@@ -92,15 +98,17 @@ func run(ctx context.Context) error {
 	if err := svc.EnsureSkillPackages(); err != nil {
 		return err
 	}
+	if err := svc.EnsureBuiltinTools(); err != nil {
+		return err
+	}
 	if summary, err := svc.MigrateLegacyStorage(); err != nil {
-		log.Printf("storage migration skipped after error: %v", err)
+		slog.Warn("storage migration skipped after error", "error", err)
 	} else if summary.Backup != "" {
-		log.Printf("storage migration completed: tasks=%d assets=%d projects=%d backup=%s", summary.Tasks, summary.Assets, summary.Projects, summary.Backup)
+		slog.Info("storage migration completed", "tasks", summary.Tasks, "assets", summary.Assets, "projects", summary.Projects, "backup", summary.Backup)
 	}
 	r := gin.New()
-	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		return fmt.Sprintf("%s - [%s] \"%s %s\" %d %s %s\n", param.ClientIP, param.TimeStamp.Format(time.RFC3339), param.Method, redactCanvasSharePath(param.Path), param.StatusCode, param.Latency, param.ErrorMessage)
-	}), gin.Recovery())
+	// 访问日志：成功的查询类请求只在 debug 级别输出，避免轮询和列表查询把日志打爆。
+	r.Use(logging.AccessLog(redactCanvasSharePath), logging.Recovery())
 	r.Use(handler.RequestCorrelationMiddleware())
 	corsMiddleware, err := cors()
 	if err != nil {
@@ -112,39 +120,7 @@ func run(ctx context.Context) error {
 	status := newSystemStatus(db, svc)
 	registerSystemStatusRoutes(api, status)
 	handler.RegisterOAuthCallbackRoutes(r, svc)
-	handler.RegisterAuthRoutes(api, svc)
-	handler.RegisterAppearanceRoutes(api, svc)
-	handler.RegisterFeatureAvailabilityRoutes(api, svc)
-	handler.RegisterResponseInterceptionRoutes(api, svc)
-	handler.RegisterAdminRoutes(api, svc)
-	handler.RegisterAdminAnalyticsRoutes(api, svc)
-	handler.RegisterAdminStorageRoutes(api, svc)
-	handler.RegisterAdminUpdateRoutes(api, svc)
-	handler.RegisterAdminSystemPerformanceRoutes(api, svc)
-	handler.RegisterAnnouncementRoutes(api, svc)
-	handler.RegisterFinanceRoutes(api, svc)
-	handler.RegisterPaymentRoutes(api, svc)
-	handler.RegisterLibTVRoutes(api, svc)
-	handler.RegisterTapNowRoutes(api, svc)
-	// 登录态模型目录代理：避免浏览器直连各上游时分别处理 CORS。
-	handler.RegisterChannelModelRoutes(api, svc)
-	handler.RegisterLogicalModelRoutes(api, svc)
-	handler.RegisterModelCatalogRoutes(api, svc)
-	handler.RegisterSystemProxyRoutes(api, svc)
-	handler.RegisterCustomRelayRoutes(api, svc)
-	handler.RegisterTaskRoutes(api, svc)
-	handler.RegisterComfyBridgeRoutes(api, svc)
-	handler.RegisterRunningHubRoutes(api, svc)
-	handler.RegisterSessionRoutes(api, svc)
-	handler.RegisterSkillRoutes(api, svc)
-	handler.RegisterUserDataRoutes(api, svc)
-	handler.RegisterChunkedUploadRoutes(api, svc)
-	handler.RegisterDiagnosticsRoutes(api, svc)
-	handler.RegisterPluginRoutes(api, svc)
-	projectAPI := api.Group("")
-	projectAPI.Use(handler.RequireFeature(svc, service.FeatureShortDrama))
-	handler.RegisterProjectRoutes(projectAPI, svc)
-	handler.RegisterCanvasShareRoutes(api, svc)
+	handler.RegisterCanvasAPI(api, svc)
 	r.NoRoute(handler.SystemProxyNoRouteHandler(svc))
 
 	listener, err := net.Listen("tcp", addr)
@@ -163,7 +139,7 @@ func run(ctx context.Context) error {
 	status.markStarted()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
-	log.Printf("backend listening on %s", addr)
+	slog.Info("backend listening", "addr", addr)
 
 	var serveFailure error
 	select {
@@ -193,7 +169,7 @@ func run(ctx context.Context) error {
 	if err := errors.Join(shutdownFailures...); err != nil {
 		return err
 	}
-	log.Printf("backend stopped gracefully")
+	slog.Info("backend stopped gracefully")
 	return nil
 }
 
@@ -241,7 +217,7 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 	return parsed, nil
 }
 
-const corsAllowedHeaders = "Accept, Content-Type, Authorization, X-Requested-With, X-Canvas-Scene, X-Idempotency-Key, X-Canvas-Trace-ID, X-Canvas-Upstream-URL, X-Canvas-Upstream-Format, X-Canvas-Allow-Local-Channel, X-Canvas-Upstream-Base-URL"
+const corsAllowedHeaders = "Accept, Content-Type, Authorization, X-Requested-With, X-Canvas-Scene, X-Idempotency-Key, X-Canvas-Trace-ID, X-Canvas-Upstream-URL, X-Canvas-Upstream-Format, X-Canvas-Upstream-Base-URL"
 
 const corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
@@ -266,7 +242,7 @@ func cors() (gin.HandlerFunc, error) {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
 		}
-		c.Header("Access-Control-Allow-Headers", corsAllowedHeaders+", X-Canvas-Comfy-Bridge-Token, X-Canvas-Bridge-Token")
+		c.Header("Access-Control-Allow-Headers", corsAllowedHeaders)
 		c.Header("Access-Control-Expose-Headers", "X-Request-ID, X-Canvas-Trace-ID, X-Diagnostic-Bundle-ID, X-Diagnostic-Schema-Version")
 		c.Header("Access-Control-Allow-Methods", corsAllowedMethods)
 		c.Header("Access-Control-Max-Age", "86400")

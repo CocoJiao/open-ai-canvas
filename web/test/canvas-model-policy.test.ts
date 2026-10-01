@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import { canvasConnectionError } from "../src/lib/canvas/canvas-connection-policy";
 import { assertCanvasImageReferenceLimit, buildGenerationConfig, canvasImageReferenceLimitError, resolveCanvasGenerationModel } from "../src/lib/canvas/canvas-project-generation";
+import { readNodeGenerationSpec, synchronizeGenerationSpec } from "../src/lib/canvas/generation-contract";
 import { defaultModelCapabilityConfig } from "../src/lib/model-capabilities";
-import { groupModelsByDisplayName, inferVideoOperation, modelCompatibilityError, modelGroupReferenceLimits, modelPromptLengthError, resolveCompatibleModel, resolveModelGenerationDefaults, resolveModelVideoBooleanOptions } from "../src/lib/model-selection";
+import { audioModelForConnectionInput, groupModelsByDisplayName, inferVideoOperation, modelCompatibilityError, modelGroupReferenceLimits, modelPromptLengthError, resolveCompatibleModel, resolveModelGenerationDefaults, resolveModelVideoBooleanOptions } from "../src/lib/model-selection";
 import { defaultConfig, normalizeModelOptionValue, type AiConfig, type ModelChannel } from "../src/stores/use-config-store";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "../src/types/canvas";
 
@@ -40,7 +41,7 @@ function policyConfig(): AiConfig {
     return { ...defaultConfig, channels: [channel], models, videoModels: models, model: models[0], videoModel: models[0] };
 }
 
-function node(id: string, type: CanvasNodeType, generationMode?: "image" | "video"): CanvasNodeData {
+function node(id: string, type: CanvasNodeType, generationMode?: "image" | "video" | "audio"): CanvasNodeData {
     return {
         id,
         type,
@@ -53,6 +54,87 @@ function node(id: string, type: CanvasNodeType, generationMode?: "image" | "vide
 }
 
 describe("逻辑模型选择", () => {
+
+    test("generationSpec 的显式 false 和 0 覆盖陈旧镜像及全局默认", () => {
+        const config = policyConfig();
+        config.videoSeconds = "9";
+        config.videoGenerateAudio = "true";
+        config.videoWatermark = "true";
+        const videoNode: CanvasNodeData = {
+            ...node("video", CanvasNodeType.Video),
+            metadata: {
+                model: "relay::cinema-image",
+                seconds: "15",
+                generateAudio: "true",
+                watermark: "true",
+                generationSpec: {
+                    version: 1,
+                    mode: "video",
+                    prompt: "canonical prompt",
+                    modelSelection: { kind: "channel", channelId: "relay", modelKey: "cinema-text" },
+                    options: { durationSeconds: 0, generateAudio: false, watermark: false },
+                    referenceBindings: [],
+                    textInputMode: "prompt-only",
+                },
+            },
+        };
+
+        const generation = buildGenerationConfig(config, videoNode, "video");
+
+        expect(generation.model).toBe("relay::cinema-text");
+        expect(generation.videoSeconds).toBe("1");
+        expect(generation.videoGenerateAudio).toBe("false");
+        expect(generation.videoWatermark).toBe("false");
+    });
+
+    test("编辑兼容字段时原子更新 canonical 合同和全部镜像", () => {
+        const original: CanvasNodeData = {
+            ...node("video", CanvasNodeType.Video),
+            metadata: {
+                seconds: "6",
+                generateAudio: "false",
+                generationSpec: {
+                    version: 1,
+                    mode: "video",
+                    prompt: "before",
+                    options: { durationSeconds: 6, generateAudio: false },
+                    referenceBindings: [],
+                    textInputMode: "prompt-only",
+                },
+            },
+        };
+
+        const edited = synchronizeGenerationSpec(original, { seconds: "9", generateAudio: "true", composerContent: "after" });
+        const spec = readNodeGenerationSpec(edited);
+
+        expect(spec?.prompt).toBe("after");
+        expect(spec?.options.durationSeconds).toBe(9);
+        expect(spec?.options.generateAudio).toBe(true);
+        expect(edited.metadata?.seconds).toBe("9");
+        expect(edited.metadata?.generateAudio).toBe("true");
+    });
+
+    test("逻辑模型合同不会被旧 metadata.model 覆盖", () => {
+        const config = policyConfig();
+        config.channels[0]!.modelCosts![0]!.logicalModelId = "cinema-logical";
+        const videoNode: CanvasNodeData = {
+            ...node("video", CanvasNodeType.Video),
+            metadata: {
+                model: "relay::cinema-image",
+                generationSpec: {
+                    version: 1,
+                    mode: "video",
+                    prompt: "logical selection",
+                    modelSelection: { kind: "logical", logicalModelId: "cinema-logical" },
+                    options: {},
+                    referenceBindings: [],
+                    textInputMode: "prompt-only",
+                },
+            },
+        };
+
+        expect(buildGenerationConfig(config, videoNode, "video").model).toBe("relay::cinema-text");
+    });
     test("技能上下文展开后按最终视频模型字符上限拒绝提交", () => {
         const config = policyConfig();
         const model = config.videoModels[0]!;
@@ -387,6 +469,104 @@ describe("画布连线能力", () => {
         const character = { ...node("character", CanvasNodeType.Image), metadata: { workflowKind: "character" as const, characterAssetId: "character-asset" } };
         const nodes = [character, node("target", CanvasNodeType.Audio)];
         expect(canvasConnectionError(config, nodes, [], { fromNodeId: "character", toNodeId: "target" })).toBe("");
+    });
+
+    test("默认音频模型不支持图片时，从图片新建音频节点改选豆包音频", () => {
+        const config = {
+            ...defaultConfig,
+            audioModel: "openai::tts-1",
+            audioModels: ["openai::tts-1", "doubao::seed-audio-1.0"],
+            channels: [
+                { id: "openai", name: "OpenAI", baseUrl: "https://api.example.com", apiKey: "k", apiFormat: "openai" as const, interfaceType: "openai-audio", models: ["tts-1"], modelCosts: [{ model: "tts-1", capability: "audio" as const, protocol: "openai-audio", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }] },
+                { id: "doubao", name: "豆包语音", baseUrl: "https://openspeech.bytedance.com", apiKey: "k", apiFormat: "openai" as const, models: ["seed-audio-1.0"], modelCosts: [{ model: "seed-audio-1.0", capability: "audio" as const, protocol: "doubao-streaming-tts", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }] },
+            ],
+        } satisfies AiConfig;
+        const imageInput = { textCount: 0, imageCount: 1, videoCount: 0, audioCount: 0, characterCount: 0 };
+        const model = audioModelForConnectionInput(config, imageInput);
+        expect(model).toBe("doubao::seed-audio-1.0");
+        const target = { ...node("target", CanvasNodeType.Audio), metadata: { model, generationMode: "audio" as const } };
+        expect(canvasConnectionError(config, [node("picture", CanvasNodeType.Image), target], [], { fromNodeId: "picture", toNodeId: "target" })).toBe("");
+        expect(audioModelForConnectionInput(config, { ...imageInput, imageCount: 0 })).toBe("openai::tts-1");
+    });
+
+    test("同显示名模型组里有豆包音频时，图片可以连接到音频节点", () => {
+        const config = {
+            ...defaultConfig,
+            audioModel: "doubao::family-audio",
+            channels: [{
+                id: "doubao",
+                name: "豆包语音",
+                baseUrl: "https://openspeech.bytedance.com",
+                apiKey: "test-key",
+                apiFormat: "openai" as const,
+                models: ["family-audio", "seed-audio-1.0"],
+                modelCosts: [
+                    { model: "family-audio", displayName: "豆包音频", capability: "audio" as const, protocol: "openai-audio", billingMode: "fixed_request" as const, unitPriceMicrocredits: 2 },
+                    { model: "seed-audio-1.0", displayName: "豆包音频", capability: "audio" as const, protocol: "doubao-streaming-tts", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 },
+                ],
+            }],
+        } satisfies AiConfig;
+        const target = { ...node("target", CanvasNodeType.Audio), metadata: { model: "doubao::family-audio", generationMode: "audio" as const } };
+        expect(canvasConnectionError(config, [node("picture", CanvasNodeType.Image), target], [], { fromNodeId: "picture", toNodeId: "target" })).toBe("");
+    });
+
+    test("豆包音频生成允许图片连接到音频节点", () => {
+        const config = {
+            ...defaultConfig,
+            model: "relay::cinema-image",
+            audioModel: "",
+            audioModels: ["doubao::seed-audio-1.0"],
+            channels: [{
+                id: "doubao",
+                name: "豆包语音",
+                baseUrl: "https://openspeech.bytedance.com",
+                apiKey: "test-key",
+                apiFormat: "openai" as const,
+                models: ["seed-audio-1.0"],
+                modelCosts: [{ model: "seed-audio-1.0", capability: "audio" as const, protocol: "doubao-streaming-tts", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }],
+            }],
+        } satisfies AiConfig;
+        const nodes = [node("picture", CanvasNodeType.Image), node("target", CanvasNodeType.Audio)];
+        expect(canvasConnectionError(config, nodes, [], { fromNodeId: "picture", toNodeId: "target" })).toBe("");
+    });
+
+    test("豆包音频生成同时拒绝图片和音频一起连接", () => {
+        const config = {
+            ...defaultConfig,
+            audioModel: "doubao::seed-audio-1.0",
+            channels: [{
+                id: "doubao",
+                name: "豆包语音",
+                baseUrl: "https://openspeech.bytedance.com",
+                apiKey: "test-key",
+                apiFormat: "openai" as const,
+                models: ["seed-audio-1.0"],
+                modelCosts: [{ model: "seed-audio-1.0", capability: "audio" as const, protocol: "doubao-streaming-tts", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }],
+            }],
+        } satisfies AiConfig;
+        const nodes = [node("picture", CanvasNodeType.Image), node("voice", CanvasNodeType.Audio), node("target", CanvasNodeType.Audio)];
+        const imageConnection = { id: "image", fromNodeId: "picture", toNodeId: "target" };
+        expect(canvasConnectionError(config, nodes, [imageConnection], { fromNodeId: "voice", toNodeId: "target" })).toContain("不能同时连接");
+    });
+
+    test("不支持参考音频的普通音频模型仍然拒绝音频连线", () => {
+        const config = {
+            ...defaultConfig,
+            model: "openai::tts-1",
+            audioModel: "openai::tts-1",
+            channels: [{
+                id: "openai",
+                name: "OpenAI",
+                baseUrl: "https://api.example.com",
+                apiKey: "test-key",
+                apiFormat: "openai" as const,
+                interfaceType: "openai-audio",
+                models: ["tts-1"],
+                modelCosts: [{ model: "tts-1", capability: "audio" as const, protocol: "openai-audio", billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }],
+            }],
+        } satisfies AiConfig;
+        const nodes = [node("voice", CanvasNodeType.Audio), node("target", CanvasNodeType.Audio)];
+        expect(canvasConnectionError(config, nodes, [], { fromNodeId: "voice", toNodeId: "target" })).toContain("不支持参考音频");
     });
 });
 

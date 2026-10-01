@@ -28,6 +28,7 @@ type UserAssetFacetRow struct {
 func (r *Repository) UserAssetsPage(userID string, page int, pageSize int, filter UserAssetPageFilter) ([]model.Asset, int64, error) {
 	var assets []model.Asset
 	var total int64
+	// 角色卡是用户素材的一种，和图片、音频一起出现在素材库；列表与 facets 使用同一查询口径。
 	query := userAssetFilteredQuery(r.db.Model(&model.Asset{}).Where("user_id = ?", userID), filter, true)
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
